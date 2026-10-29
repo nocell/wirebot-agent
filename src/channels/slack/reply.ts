@@ -98,7 +98,7 @@ export type SlackChoiceRequester = (
 
 /**
  * Render an approval prompt for a Slack section block. The prompt and option
- * details are Codex-controlled free text, so Slack entities are escaped —
+ * details are agent-controlled free text, so Slack entities are escaped —
  * otherwise `<command>` fragments vanish and `<!channel>` would ping everyone.
  */
 export function choicePromptText(prompt: string, options: readonly ChoiceOption[]): string {

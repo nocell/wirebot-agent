@@ -3,29 +3,17 @@
  * signed Telegram init data or a browser session and surfaces server-reported validation issues as
  * ConfigApiError.
  */
+import type { AgentConfigSnapshot } from "../agent/config.js";
+import type { SkillResource } from "../agent/skill-browser.js";
 import type { ManagedSchedule } from "../automations/engine.js";
-import type {
-  ConfigValidationIssue,
-  ConfigValidationResult,
-  EditableCodexConfig,
-  EditableConfigSnapshot,
-} from "../codex/config-service.js";
-import type {
-  ApplyBankedResetOutcome,
-  AvailableSkill,
-  CodexRuntimeStatus,
-  CodexUsageLimits,
-} from "../codex/runtime-service.js";
-import type { SkillResource } from "../codex/skill-browser.js";
 import type { WirebotSettings } from "../core/settings-store.js";
-import type { ConfigWriteResponse } from "../generated/codex/v2/ConfigWriteResponse.js";
+import type { AvailableSkill, ConfigValidationIssue } from "./server.js";
 import { telegramReady, webApp } from "./telegram.js";
 
+export type { AvailableSkill } from "./server.js";
+
 /** The `/api/config` wire shape; the client trusts the server's typed JSON as-is. */
-export type LoadedSnapshot = EditableConfigSnapshot & {
-  readonly wirebot: WirebotSettings;
-  readonly runtime: CodexRuntimeStatus;
-  readonly writeOutcome?: ConfigWriteResponse | undefined;
+export type LoadedSnapshot = AgentConfigSnapshot & {
   readonly wirebotVersion?: string | undefined;
 };
 
@@ -82,37 +70,13 @@ async function requestJson(path: string, init: RequestInit): Promise<unknown> {
 
 export async function requestSnapshot(
   method: "GET" | "PUT",
-  body?: Readonly<{
-    expectedVersion: string | null;
-    values: Partial<EditableCodexConfig>;
-    wirebot?: Partial<WirebotSettings>;
-  }>,
+  body?: Readonly<Partial<WirebotSettings>>,
 ): Promise<LoadedSnapshot> {
   const value = await requestJson("/api/config", {
     method,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   return value as LoadedSnapshot;
-}
-
-export async function requestValidation(
-  body: Readonly<{
-    expectedVersion: string | null;
-    values: Partial<EditableCodexConfig>;
-  }>,
-  signal?: AbortSignal,
-): Promise<ConfigValidationResult> {
-  const value = await requestJson("/api/config/validate", {
-    method: "POST",
-    body: JSON.stringify(body),
-    ...(signal === undefined ? {} : { signal }),
-  });
-  return value as ConfigValidationResult;
-}
-
-export async function requestRuntime(action: "reload" | "restart"): Promise<CodexRuntimeStatus> {
-  const value = await requestJson(`/api/runtime/${action}`, { method: "POST" });
-  return (value as { readonly runtime: CodexRuntimeStatus }).runtime;
 }
 
 export async function requestSkills(): Promise<readonly AvailableSkill[]> {
@@ -163,21 +127,6 @@ export async function requestUpdateSchedule(
 
 export async function requestDeleteSchedule(id: string): Promise<void> {
   await requestJson(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
-export async function requestUsage(): Promise<CodexUsageLimits> {
-  return (await requestJson("/api/usage", { method: "GET" })) as CodexUsageLimits;
-}
-
-export async function requestApplyBankedReset(
-  creditId: string,
-  idempotencyKey: string,
-): Promise<ApplyBankedResetOutcome> {
-  const value = await requestJson("/api/usage/reset", {
-    method: "POST",
-    body: JSON.stringify({ creditId, idempotencyKey }),
-  });
-  return (value as { readonly outcome: ApplyBankedResetOutcome }).outcome;
 }
 
 export async function requestSkillResource(skill: string, path: string): Promise<SkillResource> {

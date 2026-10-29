@@ -8,7 +8,6 @@ import { SchedulesTab } from "./schedules.js";
 import { SettingsTab, settingsRailPages } from "./settings.js";
 import { SkillsTab } from "./skills.js";
 import { Notice } from "./ui.js";
-import { UsageRail } from "./usage.js";
 
 export function SettingsApp({
   provider,
@@ -46,10 +45,8 @@ function Shell(): ReactElement {
         skillsCount={data.skills?.length}
         schedulesSummary={activeSchedules === undefined ? undefined : `${activeSchedules} active`}
         footer={
-          route.tab === "settings" ? (
-            <UsageRail />
-          ) : route.tab === "skills" ? (
-            <div className="rail-note">Reload Codex after installing or enabling a skill.</div>
+          route.tab === "skills" ? (
+            <div className="rail-note">New skills apply from the next message.</div>
           ) : undefined
         }
         version={data.snapshot?.wirebotVersion}
@@ -74,7 +71,7 @@ export function SignIn({ error }: { readonly error: string | undefined }): React
       <div className="signIn-card">
         <WirebotLogo className="signIn-logo" />
         <h1>Sign in to Wirebot</h1>
-        <p>Manage Codex settings, skills, and schedules through your bot.</p>
+        <p>Manage agent settings, skills, and schedules through your bot.</p>
         <p>
           Send <code>/wirebot web</code> in a direct message to your Slack or Discord bot, or{" "}
           <code>/web</code> in Telegram. Open the private link it replies with.

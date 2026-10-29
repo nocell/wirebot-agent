@@ -106,13 +106,13 @@ export abstract class DraftReplyStream implements OutboundStream {
     // Mirror the run into stdout: every tool call once, and reasoning
     // summaries as they change.
     for (const action of progress.actions.slice(this.#loggedActions)) {
-      this.logger.debug("Codex tool call", { action: action.label });
+      this.logger.debug("Agent tool call", { action: action.label });
     }
     this.#loggedActions = Math.max(this.#loggedActions, progress.actions.length);
     const reasoning = (progress.summary ?? progress.message)?.trim();
     if (reasoning !== undefined && reasoning.length > 0 && reasoning !== this.#lastReasoning) {
       this.#lastReasoning = reasoning;
-      this.logger.debug("Codex reasoning", { text: truncate(reasoning, 600) });
+      this.logger.debug("Agent reasoning", { text: truncate(reasoning, 600) });
     }
     this.#progress = progress;
     this.scheduleDraft();
@@ -135,7 +135,7 @@ export abstract class DraftReplyStream implements OutboundStream {
   }
 
   public async fail(message: string): Promise<void> {
-    await this.complete(`Codex error: ${message}`);
+    await this.complete(`Agent error: ${message}`);
   }
 
   private async finish(text: string, attachments: readonly OutboundAttachment[]): Promise<void> {
@@ -143,7 +143,7 @@ export abstract class DraftReplyStream implements OutboundStream {
     await this.#starting?.catch(() => undefined);
     await this.#throttle.settle();
     if (text.length > 0) {
-      this.logger.info("Codex answer delivered", { chars: text.length });
+      this.logger.info("Agent answer delivered", { chars: text.length });
     }
     const chunks =
       text.length === 0 ? [] : splitMessageText(this.renderFinal(text), this.#textLimit);

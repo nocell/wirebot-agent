@@ -2,7 +2,7 @@ const boldOpen = "\u0000B\u0000";
 const boldClose = "\u0000/B\u0000";
 
 /**
- * Convert standard Markdown produced by Codex into Slack's mrkdwn dialect.
+ * Convert standard Markdown produced by the agent into Slack's mrkdwn dialect.
  *
  * The conversion is heuristic: Slack has no headings or tables, single
  * asterisks mean bold instead of italic, and links use `<url|label>`. Code
@@ -175,7 +175,7 @@ export function escapeSlackEntities(text: string): string {
 
 /**
  * Decode the mrkdwn markup of an incoming Slack message into plain text for
- * Codex: entity escapes are reversed and `<...>` references become readable.
+ * the agent: entity escapes are reversed and `<...>` references become readable.
  */
 export function mrkdwnToPlainText(text: string): string {
   let result = text;

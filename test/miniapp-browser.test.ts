@@ -22,20 +22,55 @@ async function signIn() {
 }
 
 describe("Browser HTTP app", () => {
-  test("Auto mode saves immediately without overwriting remote-session settings", async () => {
+  test("settings patches save independently and invalid values are rejected", async () => {
     app = await startTestApp();
     const { cookie } = await signIn();
     const headers = { ...browserHeaders, Cookie: cookie.split(";")[0] as string };
-    for (const wirebot of [{ remoteClientContext: false }, { autoMode: false }]) {
+    for (const patch of [{ remoteClientContext: false }, { autoMode: false }, { effort: "high" }]) {
       const response = await request("/api/config", {
         method: "PUT",
         headers,
-        body: JSON.stringify({ expectedVersion: "test-version", values: {}, wirebot }),
+        body: JSON.stringify(patch),
       });
       expect(response.status).toBe(200);
     }
     const saved = await (await request("/api/config", { headers })).json();
-    expect(saved.wirebot).toEqual({ remoteClientContext: false, autoMode: false });
+    expect(saved.settings).toMatchObject({
+      remoteClientContext: false,
+      autoMode: false,
+      effort: "high",
+    });
+    const invalid = await request("/api/config", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ effort: "ultra" }),
+    });
+    expect(invalid.status).toBe(400);
+  });
+
+  test("lists skills from SKILL.md frontmatter and browses their files", async () => {
+    app = await startTestApp();
+    const { cookie } = await signIn();
+    const headers = { ...browserHeaders, Cookie: cookie.split(";")[0] as string };
+    expect(await (await request("/api/skills", { headers })).json()).toEqual({
+      skills: [
+        {
+          name: "workspace-guide",
+          description: "Work with your project files.",
+          source: "user",
+        },
+      ],
+    });
+    const root = await (
+      await request("/api/skills/resource?skill=workspace-guide&path=", { headers })
+    ).json();
+    expect(root.type).toBe("directory");
+    expect((await request("/api/skills/resource?skill=missing&path=", { headers })).status).toBe(
+      404,
+    );
+    expect(
+      (await request("/api/skills/resource?skill=workspace-guide&path=../..", { headers })).status,
+    ).toBe(403);
   });
   test("serves browser deep links and legacy miniapp URLs without Telegram configured", async () => {
     app = await startTestApp();
@@ -61,15 +96,10 @@ describe("Browser HTTP app", () => {
     for (const path of [
       "/api/auth/session",
       "/api/config",
-      "/api/config/validate",
       "/api/skills",
       "/api/skills/resource?skill=test",
-      "/api/usage",
-      "/api/usage/reset",
       "/api/schedules",
       "/api/schedules/test",
-      "/api/runtime/reload",
-      "/api/runtime/restart",
       "/api/unknown",
     ]) {
       expect((await request(path, { method: "POST", headers: browserHeaders })).status).toBe(401);
@@ -106,8 +136,7 @@ describe("Browser HTTP app", () => {
     app = await startTestApp();
     const { cookie } = await signIn();
     expect(
-      (await request("/api/runtime/restart", { method: "POST", headers: { Cookie: cookie } }))
-        .status,
+      (await request("/api/config", { method: "PUT", headers: { Cookie: cookie } })).status,
     ).toBe(401);
     expect(
       (

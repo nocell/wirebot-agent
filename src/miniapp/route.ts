@@ -8,7 +8,7 @@ import { useSyncExternalStore } from "react";
 import { navigateWithUnsavedGuard, telegramReady } from "./telegram.js";
 
 export type AppTab = "settings" | "skills" | "schedules";
-export type SettingsPage = "model" | "access" | "features" | "environment" | "remote";
+export type SettingsPage = "model" | "access" | "remote";
 
 export interface Route {
   readonly tab: AppTab;
@@ -17,13 +17,7 @@ export interface Route {
 }
 
 const tabs: readonly AppTab[] = ["settings", "skills", "schedules"];
-export const settingsPages: readonly SettingsPage[] = [
-  "model",
-  "access",
-  "features",
-  "environment",
-  "remote",
-];
+export const settingsPages: readonly SettingsPage[] = ["model", "access", "remote"];
 
 export function isSettingsPage(value: string | undefined): value is SettingsPage {
   return (settingsPages as readonly string[]).includes(value ?? "");

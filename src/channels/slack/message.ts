@@ -109,7 +109,7 @@ export interface SlackThreadMessage {
 }
 
 /**
- * Render the earlier messages of a thread as context for Codex, oldest first.
+ * Render the earlier messages of a thread as context for the agent, oldest first.
  * The triggering message itself is excluded, as is everything from `beforeTs`
  * on when given; when the thread exceeds the character budget the oldest
  * messages are dropped.

@@ -1,50 +1,29 @@
-import { join } from "node:path";
+import { chmod } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { detectAgentAuth } from "./agent/auth.js";
+import { AgentConfigService, modelSummary } from "./agent/config.js";
+import { createContainerEnvironmentContext } from "./agent/context.js";
+import { AgentService } from "./agent/service.js";
 import { ScheduledRunsEngine } from "./automations/engine.js";
 import { AutomationStore } from "./automations/store.js";
-import { withWirebotSettings } from "./channels/config-fields.js";
 import { DiscordChannel } from "./channels/discord/channel.js";
+import { slackAgentContext } from "./channels/slack/agent-context.js";
 import { SlackChannel } from "./channels/slack/channel.js";
-import { slackCodexContext } from "./channels/slack/codex-context.js";
 import { TelegramChannel } from "./channels/telegram/channel.js";
-import { AutoModeRouter } from "./codex/auto-mode.js";
-import { CodexConfigService } from "./codex/config-service.js";
-import { resolveSelectedModel } from "./codex/model-settings.js";
-import { CodexAppServer } from "./codex/rpc.js";
-import { CodexRuntimeService } from "./codex/runtime-service.js";
-import { CodexService, createContainerEnvironmentContext } from "./codex/service.js";
-import { CodexToolchainManager, pinnedCodexVersion } from "./codex/toolchain.js";
-import { loadAppConfig } from "./config/env.js";
-import { CodexBridge } from "./core/bridge.js";
+import { type AppConfig, loadAppConfig } from "./config/env.js";
+import { WirebotBridge } from "./core/bridge.js";
 import type { MessagingChannel } from "./core/channel.js";
 import { ConversationStore } from "./core/conversation-store.js";
 import { WirebotSettingsStore } from "./core/settings-store.js";
-import { WirebotMcpServer } from "./mcp/server.js";
 import { BrowserAuth } from "./miniapp/browser-auth.js";
 import { MiniAppServer } from "./miniapp/server.js";
 import { QuickTunnel } from "./miniapp/tunnel.js";
 import { deferred } from "./shared/async.js";
 import { errorMessage } from "./shared/errors.js";
-import { atomicWriteFile, ensureDirectory, readFileIfExists } from "./shared/fs.js";
+import { atomicWriteFile, ensureDirectory } from "./shared/fs.js";
 import { Logger } from "./shared/logger.js";
 import { wirebotVersion } from "./shared/version.js";
-import { ChatGptVoiceTranscriber } from "./transcription/service.js";
-import { CurlImpersonateTransport } from "./transcription/transport.js";
-
-/**
- * Inside the Wirebot container the container boundary is the sandbox, and the
- * agent is expected to manage the whole machine (apt, /usr/local, services),
- * so Codex's own command sandbox is off. Elsewhere the Codex default of
- * workspace-write stays.
- */
-function defaultCodexConfig(container: boolean): string {
-  return `# Managed by Wirebot. You can edit this file or use a Wirebot settings UI.
-approval_policy = "on-request"
-sandbox_mode = "${container ? "danger-full-access" : "workspace-write"}"
-web_search = "live"
-cli_auth_credentials_store = "file"
-project_root_markers = []
-`;
-}
 
 interface Stoppable {
   stop(): Promise<void>;
@@ -54,51 +33,44 @@ export async function runWirebot(): Promise<void> {
   const config = loadAppConfig();
   const logger = new Logger(config.logLevel, { service: "wirebot" });
   const shutdown = shutdownSignal(logger);
-  const codexHome = join(config.dataDirectory, "codex-home");
+  const configDirectory =
+    process.env.CLAUDE_CONFIG_DIR ?? join(config.dataDirectory, "claude-home");
   const outboundDirectory = join(config.dataDirectory, "outbound");
-  const toolchainsDirectory =
-    config.toolchainsDirectory ?? join(config.dataDirectory, "toolchains");
+  const capabilitiesDirectory =
+    process.env.WIREBOT_CAPABILITIES_DIR ??
+    fileURLToPath(new URL("../capabilities", import.meta.url));
   const statePath = join(config.dataDirectory, "conversations.json");
   const settingsPath = join(config.dataDirectory, "settings.json");
   const automationsPath = join(config.dataDirectory, "automations.json");
   const resources: Stoppable[] = [];
+  // SDK helpers in this process (session lookups) read the same config directory.
+  process.env.CLAUDE_CONFIG_DIR = configDirectory;
 
   try {
     await Promise.all([
       ensureDirectory(config.dataDirectory),
       ensureDirectory(config.workspace),
-      ensureDirectory(codexHome),
+      ensureDirectory(configDirectory),
       ensureDirectory(outboundDirectory),
     ]);
-    await ensureDefaultCodexConfig(join(codexHome, "config.toml"), config.container);
+    const agentEnvironment: Record<string, string> = {
+      WIREBOT_CAPABILITIES_DIR: resolve(capabilitiesDirectory),
+      ...(config.slackReadToken === undefined
+        ? {}
+        : { WIREBOT_SLACK_TOKEN_FILE: await writeSlackReadToken(config) }),
+    };
 
-    const toolchains = new CodexToolchainManager(
-      toolchainsDirectory,
-      logger.child({ component: "toolchain" }),
-    );
-    const binaryPath = await toolchains.ensureVersion(pinnedCodexVersion);
-
-    let codex: CodexService | undefined;
-    const mcp = new WirebotMcpServer(
-      async (threadId, turnId, reaction) => {
-        if (codex === undefined) throw new Error("Codex is not ready.");
-        await codex.reactToLastMessage(threadId, turnId, reaction);
-      },
-      logger.child({ component: "mcp" }),
-    );
-    const mcpConnection = await mcp.start();
-    resources.push(mcp);
-
-    const rpc = new CodexAppServer(
-      binaryPath,
-      config.workspace,
-      codexHome,
-      wirebotVersion,
-      logger.child({ component: "codex-rpc" }),
-      mcpConnection,
-    );
-    resources.push(rpc);
-    await rpc.start();
+    const auth = () => detectAgentAuth(process.env, configDirectory);
+    const initialAuth = auth();
+    if (initialAuth.kind === "none") {
+      logger.warn(
+        "No Claude credential found. Set ANTHROPIC_API_KEY, or Amazon Bedrock / Google Cloud variables, and restart; messages are answered with setup instructions until then.",
+      );
+    } else if (initialAuth.subscription && sharedInstance(config)) {
+      logger.warn(
+        "The agent runs on a personal Claude subscription while several people can use this bot. Anthropic's terms do not allow serving other people through a Free/Pro/Max login; use an API key or a cloud provider for shared instances.",
+      );
+    }
 
     const conversations = new ConversationStore(
       statePath,
@@ -113,88 +85,29 @@ export async function runWirebot(): Promise<void> {
       logger.child({ component: "automation-store" }),
     );
     await Promise.all([conversations.load(), settings.load(), automations.load()]);
-    const chatgptAuth = config.codexChatgptAuth;
-    const voiceTranscriber = new ChatGptVoiceTranscriber(
-      codexHome,
-      new CurlImpersonateTransport(),
-      async () => {
-        await rpc.request<unknown>({
-          method: "account/read",
-          params: { refreshToken: true },
-        });
-      },
-      chatgptAuth === undefined ? undefined : () => Promise.resolve(chatgptAuth),
-    );
-    let liveRuntime: CodexRuntimeService | undefined;
-    const configService = new CodexConfigService(rpc, config.workspace);
-    const autoRouter = new AutoModeRouter(
-      rpc,
-      configService,
+    const defaultPermissionMode = config.container ? "bypassPermissions" : "default";
+    const agent = new AgentService({
       conversations,
-      () => settings.read().autoMode,
-      logger.child({ component: "auto-mode" }),
-    );
-    codex = new CodexService(
-      rpc,
-      conversations,
-      config.workspace,
-      join(codexHome, "generated_images"),
-      outboundDirectory,
-      logger.child({ component: "codex" }),
-      voiceTranscriber,
-      () => settings.read().remoteClientContext,
-      {
-        effectiveSettings: () => liveRuntime?.settings() ?? {},
-        autoRouting: (request) => autoRouter.route(request),
-        defaultReasoningEffort: async (model) => {
-          try {
-            return resolveSelectedModel(model, (await configService.read()).capabilities.models)
-              ?.defaultReasoningEffort;
-          } catch (error) {
-            logger.warn("Could not look up the default reasoning effort", {
-              model,
-              error: errorMessage(error),
-            });
-            return undefined;
-          }
-        },
-        explicitSkillInputs: (text) => liveRuntime?.skillInputs(text) ?? [],
-        ...(config.container ? { environmentContext: createContainerEnvironmentContext() } : {}),
-        ...(config.codexSlackAccess ? { conversationContext: slackCodexContext } : {}),
-        ...(chatgptAuth === undefined
-          ? {}
-          : {
-              externalAuthTokens: (request) => {
-                logger.warn(
-                  "Codex asked to refresh the static CODEX_CHATGPT_TOKEN; returning it unchanged — replace the token and restart if authentication keeps failing",
-                  { reason: request.reason },
-                );
-                return Promise.resolve({
-                  accessToken: chatgptAuth.accessToken,
-                  chatgptAccountId: chatgptAuth.accountId,
-                  chatgptPlanType: null,
-                });
-              },
-            }),
-      },
-    );
-    if (chatgptAuth !== undefined) {
-      await codex.loginWithChatgptTokens(chatgptAuth.accessToken, chatgptAuth.accountId);
-      logger.info("Codex is authenticated with the ChatGPT token from CODEX_CHATGPT_TOKEN");
-    } else if (config.codexApiKey !== undefined) {
-      await codex.loginWithApiKey(config.codexApiKey);
-      logger.info("Codex is authenticated with the API key from CODEX_API_KEY");
-    }
-    const runtime = new CodexRuntimeService({
-      rpc,
-      codex,
-      configService,
       workspace: config.workspace,
-      logger: logger.child({ component: "codex-runtime" }),
+      configDirectory,
+      outboundDirectory,
+      capabilitiesDirectory: resolve(capabilitiesDirectory),
+      logger: logger.child({ component: "agent" }),
+      settings: () => settings.read(),
+      defaultPermissionMode,
+      ...(config.claudeExecutable === undefined
+        ? {}
+        : { claudeExecutable: config.claudeExecutable }),
+      agentEnvironment,
+      ...(config.container ? { environmentContext: createContainerEnvironmentContext() } : {}),
+      ...(config.slackReadToken === undefined ? {} : { conversationContext: slackAgentContext }),
     });
-    liveRuntime = runtime;
-    resources.push(runtime);
-    await runtime.start();
+    const configService = new AgentConfigService(
+      settings,
+      async () => await agent.supportedModels(),
+      defaultPermissionMode,
+      auth,
+    );
 
     const authChannels = new Map<string, MessagingChannel>();
     const browserAuth = new BrowserAuth(
@@ -204,12 +117,13 @@ export async function runWirebot(): Promise<void> {
     const miniApp = new MiniAppServer({
       host: config.host,
       port: config.port,
-      codex,
       browserAuth,
       ...(config.telegram === undefined ? {} : { telegramAuth: config.telegram }),
       configService,
-      runtime,
-      settings,
+      skillDirectories: [
+        { source: "user", path: join(configDirectory, "skills") },
+        { source: "bundled", path: join(resolve(capabilitiesDirectory), "skills") },
+      ],
       logger: logger.child({ component: "miniapp" }),
       ...(config.assetsDirectory === undefined ? {} : { assetDirectory: config.assetsDirectory }),
     });
@@ -249,9 +163,6 @@ export async function runWirebot(): Promise<void> {
             logger.child({ component: "telegram" }),
             publicUrl === undefined ? undefined : `${publicUrl}/miniapp`,
           );
-    const chatConfig = withWirebotSettings(configService, settings, () =>
-      runtime.afterConfigWrite(),
-    );
     const slack =
       config.slack === undefined
         ? undefined
@@ -259,7 +170,7 @@ export async function runWirebot(): Promise<void> {
             config.slack,
             join(config.workspace, ".wirebot", "attachments"),
             logger.child({ component: "slack" }),
-            chatConfig,
+            configService,
           );
     const discord =
       config.discord === undefined
@@ -267,7 +178,7 @@ export async function runWirebot(): Promise<void> {
         : new DiscordChannel(
             config.discord,
             logger.child({ component: "discord" }),
-            publicUrl === undefined ? chatConfig : undefined,
+            publicUrl === undefined ? configService : undefined,
           );
     const channels = [telegram, slack, discord].filter(
       (channel): channel is NonNullable<typeof channel> => channel !== undefined,
@@ -275,17 +186,17 @@ export async function runWirebot(): Promise<void> {
     for (const channel of channels) authChannels.set(channel.name, channel);
     const scheduledRuns = new ScheduledRunsEngine({
       store: automations,
-      codex,
+      agent,
       channels,
       workspace: config.workspace,
       logger: logger.child({ component: "scheduled-runs" }),
     });
     miniApp.setScheduledRuns(scheduledRuns);
-    const bridge = new CodexBridge(
-      codex,
+    const bridge = new WirebotBridge(
+      agent,
       publicUrl,
       logger.child({ component: "bridge" }),
-      runtime,
+      { auth, modelSummary: () => modelSummary(settings.read()) },
       scheduledRuns,
       browserAuth,
     );
@@ -298,7 +209,7 @@ export async function runWirebot(): Promise<void> {
 
     logger.info("Wirebot is ready", {
       version: wirebotVersion,
-      codexVersion: pinnedCodexVersion,
+      auth: initialAuth.kind,
       workspace: config.workspace,
       webApp: publicUrl === undefined ? `${config.host}:${config.port}/app` : `${publicUrl}/app`,
       telegram: telegram === undefined ? "disabled" : "enabled",
@@ -316,26 +227,31 @@ export async function runWirebot(): Promise<void> {
   }
 }
 
-async function ensureDefaultCodexConfig(path: string, container: boolean): Promise<void> {
-  const contents = await readFileIfExists(path);
-  if (contents === undefined) {
-    await atomicWriteFile(path, defaultCodexConfig(container));
-    return;
-  }
-  const hasCredentialStore = /^\s*cli_auth_credentials_store\s*=/mu.test(contents);
-  const withoutProjectRootMarkers = contents.replace(
-    /^\s*project_root_markers\s*=.*(?:\r?\n|$)/gmu,
-    "",
-  );
-  const firstTable = withoutProjectRootMarkers.search(/^\s*\[/mu);
-  const root =
-    firstTable < 0 ? withoutProjectRootMarkers : withoutProjectRootMarkers.slice(0, firstTable);
-  const tables = firstTable < 0 ? "" : withoutProjectRootMarkers.slice(firstTable);
-  const credentialStore = hasCredentialStore ? "" : '\ncli_auth_credentials_store = "file"';
-  const isolated = `${root.trimEnd()}${credentialStore}\nproject_root_markers = []\n${tables.length === 0 ? "" : `\n${tables.trimStart()}`}`;
-  if (isolated !== contents) {
-    await atomicWriteFile(path, isolated);
-  }
+/** True when more than one person may talk to the agent through this instance. */
+function sharedInstance(config: AppConfig): boolean {
+  const users =
+    (config.telegram?.allowedUserIds.size ?? 0) +
+    (config.slack === undefined
+      ? 0
+      : config.slack.allowAllWorkspaceMembers
+        ? 2
+        : config.slack.allowedUserIds.size) +
+    (config.discord?.allowedUserIds.size ?? 0);
+  return users > 1;
+}
+
+/**
+ * Hand the Slack read token to the agent as a private file: the subprocess
+ * credential scrub would strip it from the environment of the agent's tools.
+ */
+async function writeSlackReadToken(config: AppConfig): Promise<string> {
+  const directory = join(config.dataDirectory, "secrets");
+  const path = join(directory, "slack-read-token");
+  await ensureDirectory(directory);
+  await chmod(directory, 0o700);
+  await atomicWriteFile(path, `${config.slackReadToken ?? ""}\n`);
+  await chmod(path, 0o600);
+  return path;
 }
 
 function shutdownSignal(logger: Logger): {

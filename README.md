@@ -1,378 +1,141 @@
-# 🤖 Wirebot
+# 🤖 Wirebot Agent
 
-Wirebot brings Codex to your messenger: a full Codex agent you talk to from Telegram, Slack, or Discord, built on a transport layer designed so more messengers can follow.
+A Claude agent in your messenger: talk to it from Telegram, Slack, or Discord, and it works on a real machine with a shell, files, the web, and skills.
 
-Think of it as OpenClaw or Hermes Agent with a different philosophy:
+Wirebot Agent is a port of [Wirebot](https://github.com/sadfun/wirebot) by sadfun from the OpenAI Codex app-server to the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview). The messenger transport, scheduled runs, and web app are Wirebot's. The agent loop, tools, sessions, skills, and context management come from Claude Code, which the Agent SDK runs as a library.
 
-* **Built specifically for Codex.** Wirebot runs on Codex's official app server, which makes it exceptionally stable and gives it native support for every Codex feature.
-* **No custom harness.** Turns, skills, and tool calls are handled by Codex itself — OpenAI's harness is already very good, so instead of reinventing the wheel, Wirebot focuses on being a better **transport**.
-* **No vendor lock-in.** Codex is an open-source harness, and you can proxy any model you want through it.
+* **Telegram, Slack (Socket Mode), and text-only Discord.** Supports files in both directions, threads, approvals, commands, and scheduled notifications. No public webhook is needed.
+* **A real agent experience.** It streams progress (tool calls, the agent's to-do list, interim text). Approval prompts and the agent's clarifying questions (`AskUserQuestion`) appear as buttons. Sessions persist and can be resumed, and `/compact` and `/stop` work.
+* **Scheduled runs.** Describe a recurring task in plain language and the agent manages it through a host tool.
+* **Auto effort.** Each message picks an effort level (low … max) from its wording, with no extra model call.
+* **Skills.** It uses Claude Code skills from the agent's config directory and the project, plus bundled skills (container runtime and read-only Slack history).
+* **Web app / Telegram Mini App.** Edit the shared settings, browse skills, and manage schedules.
 
-Out of the box:
+## Can it run on a Claude subscription?
 
-* **Rich Telegram I/O** — photos and files in both directions, voice messages with automatic transcription, forwarded and replied-to context, polls and other structured messages.
-* **Slack over Socket Mode** — direct messages, channel threads, approvals, files, commands, and scheduled notifications without a public webhook.
-* **Text-only Discord** — direct messages, isolated server threads, streaming, approvals, commands, settings, and scheduled notifications with no public endpoint.
-* **A real agent experience** — streamed replies and thinking, interactive approvals, persistent Codex threads, private conversations, and guest mentions.
-* **Scheduled runs** — describe an automation in plain language and Wirebot keeps it running, following Codex Desktop's scheduled-task model.
-* **Settings Mini App** — an authenticated in-Telegram UI for Codex configuration, skills, and schedules.
-* **Pinned Codex CLI** — each release bundles the exact compatible Codex version, so nothing depends on a global installation.
+**Technically yes. By Anthropic's terms, only for yourself.**
 
-## Deployment
+The Agent SDK runs the unmodified Claude Code binary, which accepts every credential Claude Code does: a Claude Console API key, Amazon Bedrock, Google Cloud, Microsoft Foundry, a gateway token, or a subscription token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`).
 
-### Quick install
+Anthropic's [terms for Claude Code and the Agent SDK](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) say:
 
-On a fresh Linux server (x86_64 or arm64), one command sets everything up:
+* Subscription (Free/Pro/Max) OAuth is for **ordinary, individual use**. Developers may not route requests through Free, Pro, or Max credentials **on behalf of other users**, and may not offer claude.ai login inside their products.
+* Products and services built on the Agent SDK should use **API key authentication** (Claude Console or a cloud provider).
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/sadfun/wirebot/main/install.sh | sudo sh
-```
+In practice:
 
-The wizard takes about five minutes and is safe to re-run. It:
+| Instance | Credential |
+|---|---|
+| A personal bot that only you talk to | `CLAUDE_CODE_OAUTH_TOKEN` from your own `claude setup-token`, or an API key |
+| A bot shared by a team, a workspace (`SLACK_ALLOWED_USER_IDS=*`), or anyone else | `ANTHROPIC_API_KEY` or Bedrock / Google Cloud. **Not a subscription.** |
 
-1. Installs the latest Docker Engine if the server has none.
-2. Signs Codex in to your ChatGPT plan with the device-code flow.
-3. Walks you through connecting Telegram, Slack, or Discord, and verifies every token against the messenger's API before using it. On Telegram it learns your user ID from a message you send the bot.
-4. Optionally takes a (sub)domain for `PUBLIC_URL`, checks whether it points straight at the server or through Cloudflare's proxy, and offers to run [Caddy](https://caddyserver.com) next to Wirebot when nothing serves it yet: automatic HTTPS for a direct domain, or an origin that works with every Cloudflare SSL mode for a proxied one.
-5. Writes `docker-compose.yml` and `.env` to `/opt/wirebot`, starts Wirebot, and waits for it to report healthy.
-6. Registers `wirebot-updater.service`, which keeps Wirebot current without interrupting work (see [Updates](#updates)).
+Wirebot Agent never asks for or stores a claude.ai login itself. There is no in-chat sign-in; the operator configures the credential in the environment. At startup it logs a warning when a subscription credential is combined with more than one allowed user. This README is not legal advice: read the linked terms, and ask Anthropic if your case is unclear.
 
-For unattended installs, pass `--yes` and give everything as flags or as the environment variables from the [configuration reference](#configuration-reference) (the environment keeps secrets out of the process list):
+## Quick start (Docker)
 
 ```sh
-export TELEGRAM_BOT_TOKEN=123456:replace-me TELEGRAM_ALLOWED_USER_IDS=123456789
-curl -fsSL https://raw.githubusercontent.com/sadfun/wirebot/main/install.sh |
-  sudo -E sh -s -- --yes --public-url https://codex.example.com --caddy
-```
-
-With `--yes` the Codex sign-in is skipped unless `CODEX_API_KEY` or `CODEX_CHATGPT_TOKEN` is given; send `/login` to the bot afterwards. `sh install.sh --help` lists every option.
-
-### Run with Docker manually
-
-Requirements: Docker (or any OCI runtime) and at least one configured Telegram, Slack, or Discord connector.
-
-Create a directory with a `docker-compose.yml`:
-
-```yaml
-services:
-  wirebot:
-    image: ghcr.io/sadfun/wirebot:latest
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - wirebot-data:/data
-
-volumes:
-  wirebot-data:
-```
-
-And a `.env` next to it:
-
-```dotenv
-TELEGRAM_BOT_TOKEN=123456:replace-me
-TELEGRAM_ALLOWED_USER_IDS=123456789
-```
-
-`TELEGRAM_ALLOWED_USER_IDS` is a comma-separated list. Messages from other accounts are ignored, including guest-mode mentions. Then:
-
-For Slack instead, follow the [Slack connector setup](docs/slack.md) and set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_ALLOWED_USER_IDS`.
-
-For Discord, follow the [Discord connector setup](docs/discord.md) and set `DISCORD_BOT_TOKEN` and `DISCORD_ALLOWED_USER_IDS`.
-
-```sh
+mkdir wirebot && cd wirebot
+curl -fsSLO https://raw.githubusercontent.com/nocell/wirebot-agent/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/nocell/wirebot-agent/main/example.env -o .env
+$EDITOR .env    # one Claude credential + at least one connector
 docker compose up -d
+docker compose logs -f   # wait for "Wirebot is ready"
 ```
 
-Open a private chat with the bot and start setup: send `/start` on Telegram or `/wirebot start` on
-Slack and Discord. No OpenAI API key is required.
+The image (`ghcr.io/nocell/wirebot-agent`, amd64 and arm64) is an Ubuntu machine for the agent. It runs as a non-root user with passwordless sudo. Everything worth keeping lives in the `/data` volume:
 
-### The machine model
+| Path | Contents |
+|---|---|
+| `/data/workspace` | the agent's working directory |
+| `/data/claude-home` | `CLAUDE_CONFIG_DIR`: Claude Code settings, user skills, memory, sessions |
+| `/data/home`, `/usr/local`, `/home/linuxbrew` | the agent's home and installed tools |
 
-The container filesystem is the **image**: Ubuntu, the wirebot binary, the pinned Codex CLI, and a preinstalled toolset (git, python3, build-essential, ffmpeg, imagemagick, jq, ripgrep, and more). Updating Wirebot means pulling a new image and recreating the container — the image is never modified in place.
+Inside the container the container is the isolation boundary, so the default permission mode is **full access** (`bypassPermissions`). Outside the container the default is **ask** (`default`). Both can be changed in settings.
 
-Everything personal lives in the **`/data` volume** and survives every update:
-
-| Path               | Contents                                                                          |
-|--------------------|-----------------------------------------------------------------------------------|
-| `/data/workspace`  | The Codex working directory (`CODEX_WORKSPACE`)                                   |
-| `/data/home`       | The agent user's home: dotfiles, SSH keys, git config, `~/.local`, caches         |
-| `/data/usr-local`  | `/usr/local` is a symlink here: `make install`, static binaries, pip/npm prefixes |
-| `/data/linuxbrew`  | `/home/linuxbrew` is a symlink here: an optional Homebrew installation            |
-| `/data/codex-home` | Codex login, `config.toml`, skills, sessions (`CODEX_HOME`)                       |
-| `/data/*.json`     | Wirebot conversations, settings, and scheduled runs                               |
-
-The agent runs as an unprivileged user with passwordless sudo, so `apt-get install` works — but apt installs land outside `/data` and disappear on the next image update. Codex is told this contract on every turn: one-off needs can use apt, while software worth keeping belongs in `/usr/local`, the home directory, or Homebrew. Popular missing tools are good candidates for the image itself; open an issue.
-
-Codex's own command sandbox defaults to `danger-full-access` inside the container: the container boundary is the sandbox, and the machine belongs to the agent. Approval policy is separate and stays interactive by default; both are editable in the settings Mini App. This also means anything with access to the container has access to everything in it, including Codex credentials — treat the container and its volume like a personal machine.
-
-### Updates
+There is also an interactive installer for a fresh Linux server:
 
 ```sh
-docker compose pull && docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/nocell/wirebot-agent/main/install.sh | sudo sh
 ```
 
-State lives in the volume, so recreating the container is safe. Images are tagged `latest` and `X.Y.Z` on GHCR; pin a version tag if you prefer explicit upgrades.
+## Configuration
 
-The [quick install](#quick-install) automates this with `wirebot-updater.service`, a small systemd service running `/opt/wirebot/updater.sh`. Every hour it pulls the images named in `docker-compose.yml`. Once a newer one has arrived, it asks `/healthz` every minute whether Wirebot is working — the `busy` field is true while a turn, a scheduled run, or a queued message is in flight — and recreates the containers after five idle answers in a row, so an update never cuts a running task short. Follow it with `journalctl -u wirebot-updater`; `systemctl disable --now wirebot-updater` turns it off. On a manual setup, [Watchtower](https://containrrr.dev/watchtower/) or your orchestrator can automate the pull instead.
+See [`example.env`](example.env) for every variable. The essentials:
 
-### The web app URL
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude Console API key, recommended |
+| `CLAUDE_CODE_USE_BEDROCK=1` (+ AWS creds/region), `CLAUDE_CODE_USE_VERTEX=1` | Cloud providers |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Personal subscription token, single-user instances only (see above) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS` | Telegram connector |
+| `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_ALLOWED_USER_IDS`, `SLACK_ADMIN_USER_IDS` | Slack connector ([docs/slack.md](docs/slack.md)) |
+| `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS`, `DISCORD_ADMIN_USER_IDS` | Discord connector ([docs/discord.md](docs/discord.md)) |
+| `PUBLIC_URL` / `WIREBOT_TUNNEL` | Public HTTPS origin for the web app, or a TryCloudflare quick tunnel |
+| `WIREBOT_SLACK_READ_TOKEN` | Optional read-only Slack token for the `slack-history` skill |
+| `WIREBOT_CLAUDE_EXECUTABLE` | Optional path to a separately installed `claude` binary |
 
-To expose the web app and Telegram Mini App, set a public HTTPS origin:
+Credentials never reach the agent's tools:
 
-```dotenv
-PUBLIC_URL=https://codex.example.com
-```
+* Connector tokens are bridge-only and are removed from the agent's environment.
+* `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` (on by default) strips Claude credentials from the environments of Bash commands, hooks, and MCP servers the agent starts.
+* The optional Slack read token is handed over as a `0600` file rather than an environment variable.
 
-and reverse-proxy that origin to the container's port 8787 (publish it in your compose file; the [quick install](#quick-install) can run Caddy for this), or leave `PUBLIC_URL` unset: Wirebot then opens a [TryCloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) using the bundled pinned cloudflared. Quick tunnels are best-effort — the URL changes on every start and Cloudflare offers no uptime guarantee — so set `PUBLIC_URL` for a persistent deployment. Set `WIREBOT_TUNNEL=off` to never open a tunnel; without a tunnel or `PUBLIC_URL`, browser sign-in links and Telegram’s Settings button are unavailable, and Slack/Discord keep their in-chat settings picker. The HTTP app and health endpoint still run locally. The tunnel fallback works with any configured messenger, including Slack-only and Discord-only deployments.
+## Commands
 
-### Configuration reference
+| Command | |
+|---|---|
+| `new` | start a fresh session (`back` returns to the previous one) |
+| `stop` | interrupt the running turn |
+| `compact` | summarize earlier context |
+| `schedules` | list scheduled runs |
+| `status` | show the credential source and model |
+| `config` / `web` | open settings (admins) |
+| `help` | list commands |
 
-| Variable                    | Default                    | Purpose                                  |
-|-----------------------------|----------------------------|------------------------------------------|
-| `TELEGRAM_BOT_TOKEN`        | connector-dependent        | Bot token from @BotFather                |
-| `TELEGRAM_ALLOWED_USER_IDS` | connector-dependent        | Comma-separated numeric allowlist        |
-| `SLACK_BOT_TOKEN`           | connector-dependent        | Slack bot OAuth token (`xoxb-…`)         |
-| `SLACK_APP_TOKEN`           | connector-dependent        | Slack Socket Mode token (`xapp-…`)       |
-| `SLACK_ALLOWED_USER_IDS`    | connector-dependent        | Member IDs, or `*` for workspace members |
-| `SLACK_ADMIN_USER_IDS`      | unset                      | Members allowed to run global commands   |
-| `DISCORD_BOT_TOKEN`         | connector-dependent        | Discord application bot token            |
-| `DISCORD_ALLOWED_USER_IDS`  | connector-dependent        | Comma-separated Discord user snowflakes  |
-| `DISCORD_ADMIN_USER_IDS`    | unset                      | Users allowed to run global commands     |
-| `PUBLIC_URL`                | unset                      | Public HTTPS origin for the Mini App     |
-| `WIREBOT_TUNNEL`            | `auto`                     | `off` disables the quick-tunnel fallback |
-| `TELEGRAM_API_BASE`         | `https://api.telegram.org` | Alternate Bot API server for large files |
-| `CODEX_CHATGPT_TOKEN`       | unset                      | ChatGPT access token for headless auth   |
-| `CODEX_CHATGPT_ACCOUNT_ID`  | from token                 | Workspace id when the token lacks it     |
-| `CODEX_API_KEY`             | unset                      | OpenAI API key for headless Codex auth   |
-| `HOST` / `PORT`             | `0.0.0.0` / `8787`         | Mini App listener (container default)    |
-| `LOG_LEVEL`                 | `info`                     | `debug`, `info`, `warn`, or `error`      |
-| `WIREBOT_CODEX_SLACK_TOKEN` | unset                      | Slack token Codex may read history with  |
+On Telegram these are `/new` and so on. On Slack and Discord use `/wirebot new`, or mention the bot inside a thread.
 
-## Authenticate Codex
+## Settings
 
-After Wirebot is running, open a private chat with the bot and send `/login`. Follow the device-code link and complete ChatGPT sign-in. Credentials land in the volume's `codex-home`, so restarts and image updates do not require another login. `/status` shows the active account, and `/logout` removes it.
+Everyone using an instance shares these settings, edited from the chat settings menu or the web app:
 
-For headless deployments, credentials can come from the environment instead — Wirebot then signs Codex in on every start, so no interactive `/login` is needed, and the environment reasserts itself over any interactive sign-in after a restart. Leave both variables unset to keep the ChatGPT device-code flow. Either way the secret travels to Codex over its control channel and is stripped from agent subprocess environments.
+* **Model**: Claude Code's default or any model your credential can use, read live from the Agent SDK.
+* **Auto effort / Effort**: per-message heuristic effort, or one fixed level. See [docs/auto-mode.md](docs/auto-mode.md).
+* **Permissions**: full access, accept edits, ask before risky actions, only pre-approved tools, or plan only. Approval prompts appear in the chat that started the turn. Scheduled runs never prompt; anything not pre-approved is denied.
+* **Remote client context**: tells the agent that the user is remote, how files are delivered, and so on.
 
-- `CODEX_CHATGPT_TOKEN` — a ChatGPT access token, the same one the normal auth flow produces (`tokens.access_token` in an existing `codex-home/auth.json`). The workspace id is read from the token's claims; set `CODEX_CHATGPT_ACCOUNT_ID` only if the token doesn't carry one. Voice transcription works with this token. Wirebot cannot refresh a token it was handed, so when it expires, supply a fresh one and restart.
-- `CODEX_API_KEY` — an OpenAI API key. Note that voice transcription uses ChatGPT credentials and stays unavailable with API-key auth.
+## How it works
 
-The two are mutually exclusive.
+* Each chat turn is one Agent SDK `query()` that resumes the conversation's Claude Code session. The agent process runs only during a turn, and turns in one conversation are serialized.
+* Messenger replies are the agent's final message. Tool calls and interim text stream as transient progress.
+* Host tools (`react_to_last_message`, `automation_update`) come from an in-process MCP server created for each turn, so every call is already bound to its conversation and message.
+* Files: when the final reply links a workspace file (`[report](out/report.pdf)`), Wirebot uploads it as an attachment.
+* Bundled skills ship as a local Claude Code plugin (`capabilities/`). Add your own under `/data/claude-home/skills`.
 
-Voice messages use that same ChatGPT subscription. Wirebot briefly shows a **Transcribing…** thinking block, sends the OGG recording to ChatGPT's Codex dictation service, and then starts the normal Codex turn with both the transcript and original attachment. The pinned, checksum-verified browser-compatible HTTP transport is bundled in the image.
+## Differences from upstream Wirebot
 
-## Telegram commands
+* Claude Agent SDK instead of the Codex app-server. No pinned Codex toolchain, protocol bindings, or app-server restarts.
+* No in-chat login (`/login`, `/logout`, device codes): the operator configures credentials.
+* No voice transcription. It relied on ChatGPT; voice messages are forwarded as audio files.
+* No usage-limit page.
+* The settings model is Claude's (model, effort, permission mode) instead of Codex `config.toml`.
+* Auto mode routes effort locally instead of with a classifier model call.
 
-| Command      | Effect                                                                                           |
-|--------------|--------------------------------------------------------------------------------------------------|
-| `/start`     | Show setup guidance and start sign-in when required.                                             |
-| `/new`       | Interrupt the current turn, forget its thread, and start fresh on the next message.              |
-| `/back`      | Return to the previously active Codex task.                                                      |
-| `/stop`      | Interrupt the running Codex turn.                                                                |
-| `/compact`   | Ask Codex to summarize earlier context in the current task; unavailable while a turn is running. |
-| `/schedules` | List your scheduled runs and their next execution times.                                         |
-| `/status`    | Check app-server connectivity and the current Codex account.                                     |
-| `/login`     | Start Codex's ChatGPT device-code login in a private chat.                                       |
-| `/logout`    | Sign out through Codex in a private chat.                                                        |
-| `/web`      | Get a one-use link to sign in to the browser app (private chats, admins only).                     |
-| `/config`    | Open the authenticated settings Mini App in a private chat.                                      |
-| `/reload`    | Reload config, MCP servers, and skills through Codex's native app-server APIs.                   |
-| `/restart`   | Drain active work and safely restart only the Codex app-server.                                  |
-| `/help`      | Show the command list.                                                                           |
-
-Messages that are not commands become `turn/start` requests. Telegram voice messages are transcribed before the turn starts, while their original OGG files remain available to Codex. Photos and supported image files use Codex's native image input. Videos, other audio, documents, animated stickers, and other binary files are downloaded under `.wirebot/attachments` in the Codex workspace and passed as local paths; captions, replies, forwards, polls, contacts, locations, checklists, and Telegram-only structures are preserved as concise text context. Codex commentary drives Telegram's thinking indicator, final-answer deltas drive the draft, approval or user-input requests become inline choices, and native automatic or manual context compaction is shown in the same progress stream.
-
-Every turn also carries connector-derived application context separately from the user's message: it tells Codex that the user is remote (so host-local browser windows and `localhost` links are not user-accessible) and identifies the Wirebot container. Codex loads the bundled `wirebot-runtime` skill when persistence or installation details are relevant.
-
-In the other direction, Wirebot uploads completed Codex image-generation results and regular workspace files explicitly linked in the final answer. JPEG and PNG images, GIF animations, MP4 videos, and MP3 or M4A audio use Telegram's native media methods; everything else is sent as a document. Native-media failures retry as documents, individual upload failures remain visible, and Wirebot snapshots canonically validated files before upload. Markdown links are limited to the configured workspace; structured image-generation outputs are also accepted from Codex's dedicated generated-image directory. Ordinary source edits, code examples, arbitrary paths, and unlinked files are never uploaded automatically.
-
-Telegram's hosted Bot API only allows bots to download files up to 20 MB and upload general files up to 50 MB. Wirebot still forwards the file metadata and a clear limitation notice when a download or upload is unavailable. Set `TELEGRAM_API_BASE` to a [local Bot API server](https://core.telegram.org/bots/api#using-a-local-bot-api-server) to remove the download limit and support larger uploads.
-
-## Slack connector
-
-Wirebot can additionally bridge Codex into Slack over [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) — no public URL required. Direct messages stream progress like the Telegram private chat; in channels the bot answers mentions in threads, with each thread acting as its own Codex conversation. Approvals arrive as buttons, files flow in both directions, and commands are available as `/wirebot <subcommand>` (Slack reserves bare `/new`-style messages for its own slash-command system). `@Wirebot new` in a thread, or `new` in the bot DM, restarts that conversation's Codex task. Channel threads retain their full Slack history as context; DMs start fresh after `new`. Scheduled runs created from Slack notify back into the originating channel or thread.
-
-Set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_ALLOWED_USER_IDS` together to enable it. [docs/slack.md](docs/slack.md) walks through creating the Slack app from a pasteable manifest, collecting both tokens, and first steps. Admins can open native settings using `/wirebot config`, or the full web app using `/wirebot web`, in a bot DM. No Telegram account is needed.
-
-## Discord connector
-
-Wirebot connects through the Discord Gateway with [discord.js](https://github.com/discordjs/discord.js), so it needs no inbound webhook or public URL. Direct messages are ordinary Codex conversations. In a server, mention the bot in a text channel and Wirebot creates a dedicated public thread when Discord permissions allow it; subsequent messages in that bot-owned thread need no repeated mention. Mentions inside existing threads keep that thread as the conversation boundary. Native `/wirebot` commands, streamed progress, approval buttons, interactive Codex settings in DMs, and scheduled notifications all use the same persistent Codex tasks as the other connectors.
-
-The connector is deliberately text-only. It does not download Discord attachments, stickers, or polls, and it never uploads generated files; both inbound and outbound omissions are stated in the conversation. Model-authored mentions and link previews are suppressed on every outbound create and edit. Set `DISCORD_BOT_TOKEN` and `DISCORD_ALLOWED_USER_IDS` together to enable it, then follow [docs/discord.md](docs/discord.md) for the Developer Portal intent, invite permissions, user IDs, and first run.
-
-## Scheduled runs
-
-Ask Codex naturally, for example, “Every weekday at 9, check this project for failed CI runs” or “Revisit this task every hour and notify me only if something changed.” Wirebot exposes a host-managed `automation_update` tool to new Codex tasks and stores each schedule with an explicit time zone. A task created before upgrading does not have that tool in its persisted definition; send `/new` once before asking it to create or edit schedules. `/schedules` remains available for viewing them.
-
-The Mini App's **Schedules** tab lists every schedule owned by the authenticated user, including schedules created in other topics. It can create fresh-task schedules with friendly minute, hourly, daily, weekday, and weekly presets or a custom RRULE; existing schedules can be edited, paused, resumed, or deleted with revision checks and confirmation for destructive actions.
-
-The recurrence engine accepts a bounded RRULE subset covering minutely, hourly, daily, and weekly schedules. It rejects multi-line, unusually dense, or computationally expensive rules instead of allowing schedule evaluation to stall the bridge.
-
-Scheduled runs follow the [Codex Desktop scheduled-task model](https://developers.openai.com/codex/app/automations):
-
-- A cron run starts a fresh persistent Codex task for each occurrence. A heartbeat revisits the Codex task in which it was created.
-- When the scheduler claims work, an active or waiting user message makes it defer and retry. If an unattended run has already started, a later message shows a queued status and begins as soon as that run finishes.
-- Heartbeats can suppress unimportant results. Cron results notify by default, and delivery failures are recorded without rerunning already completed work.
-- Each schedule gets a small durable memory file under the workspace's `.wirebot/automations` directory, which the run reads and may update.
-
-Notifications deliberately do not change the active task. Your next ordinary message still goes to the task you were already using. Replying to a scheduled notification also stays in that task, but Wirebot supplies the complete stored result as additional context even when the provider split or truncated the visible message. **Continue this run** explicitly switches to the notification's source task when the conversation is idle; `/back` returns to the previous task.
-
-Scheduling and delivery state use opaque provider references rather than provider-specific message or chat fields. Telegram, Slack, and Discord each define their own destination and message identifier formats without changing the scheduler.
-
-Wirebot retains the latest 100 run and notification records for each schedule so local state stays bounded. Since there is no systemd in the container, processes the agent starts do not survive restarts — scheduled runs are the supported way to re-establish or monitor long-lived work.
-
-The service must be running when work becomes due; this is not a cloud scheduler and it does not wake a powered-off machine.
-
-### The one custom-harness exception
-
-Wirebot's design rule is to use Codex's native app-server behavior instead of building a custom agent harness. The scheduled-runs engine is the one exception because Codex Desktop already implements scheduling in its host application rather than in Codex CLI. Wirebot mirrors that approach nearly 1:1: the host claims due work, applies foreground priority, persists run and notification state, and asks Codex to execute normal turns. As soon as Codex CLI or app-server provides native cron ownership, Wirebot will switch to it immediately and retire this engine.
-
-## Web app and Telegram Mini App
-
-Open `https://your-wirebot-origin/app` in a normal browser. Settings, Skills, and Schedules have bookmarkable URLs at `/app/settings`, `/app/skills`, and `/app/schedules`, and so do their detail pages: `/app/settings/model`, `/app/settings/access`, `/app/settings/features`, `/app/settings/environment`, `/app/settings/remote`, `/app/skills/<name>`, `/app/schedules/<id>`, and `/app/schedules/new`; `/` and the existing `/miniapp` URL work too. Wide browsers (900px and up) use a left rail that lists the Settings pages with their current values and shows usage limits, and open Skills and Schedules as a list beside the detail. Phones use bottom navigation on the three tab roots; sub-pages drop the tab bar in favor of a back link and a single bottom action, so a Save button never stacks on the tab bar. Browser colors follow the system light/dark preference, independently of Telegram. Mobile layouts support safe areas, dynamic viewport height, readable form controls, and pinch zoom.
-
-For browser sign-in, send `/wirebot web` in a private Slack or Discord bot chat; Telegram users can send `/web`. The bot replies with a private, one-use link that expires in 5 minutes. Open it in your preferred browser. Requesting a new link invalidates your previous unused link. After signing in, ordinary URLs work for 12 hours, including across reloads and new tabs. **Sign out** revokes that browser session; restarting Wirebot invalidates all links and sessions. In Slack, `/wirebot config` always opens the native menu buttons, including Auto effort & speed, model, manual effort, and the available speed tiers. Button changes save immediately and apply to the next Codex turn. Discord also accepts `/wirebot config` for browser sign-in when the web app is available.
-
-Browser access follows the connector's bot-admin policy, not Slack workspace or Discord server roles: `SLACK_ADMIN_USER_IDS` and `DISCORD_ADMIN_USER_IDS` restrict access when configured, and otherwise every authorized user is an admin. All Telegram allowlisted users are admins. The server rechecks authorization when issuing links, exchanging them, and using a session (Slack workspace membership uses its existing 10-minute cache). Link secrets live in URL fragments, are removed from the address bar on load, and are exchanged for Secure, HttpOnly, SameSite cookies. Serve the public app over HTTPS and keep login links private. Browser auth uses no Telegram SDK, localStorage, or third-party authentication service.
-
-Schedules retain the signed-in messenger identity: you see schedules owned by that account, and new schedules use the private conversation from which you requested the link. Accounts on different messengers are separate identities.
-
-The Mini App is pinned to the bot's **Settings** menu button when its public URL is available; `/config` remains an equivalent entry point. At startup Wirebot reconciles both Telegram's default button and each allowlisted private chat, so a stale chat-specific command-menu override cannot hide the Mini App. It uses source-owned UI components styled with Tailwind and authenticates Telegram launches using signed `initData` from allowlisted users. Its tab bar keeps **Settings** first, **Skills** second, and adds a **Schedules** screen for owner-scoped schedule management. The Skills screen is a searchable list of every enabled skill from Codex's native `skills/list` response. Opening a skill shows its `SKILL.md` instructions on one tab and, on the other, a read-only browser for bundled scripts, references, images, and other files (desktop shows the file tree beside the instructions). Schedules are rows with a pause switch; opening one edits it, and deleting lives inside the editor. Skill paths remain confined to that skill's directory, and oversized files are not loaded into the browser.
-
-Inside Telegram, nested Mini App screens use the native header back button; ordinary browser
-rendering keeps the in-page back controls. Every multiline input can open a focused full-screen
-editor with a local draft and explicit Apply action. Unsaved Settings and Schedule drafts are
-protected on back navigation, tab changes, browser unload, and Telegram Mini App close.
-
-The Settings tab opens as a summary: usage limits, the Codex configuration pages (Model, Access & approvals, Features, Environment) with their current values, the default-on remote session context toggle, and the runtime controls. Each page saves on its own with one Save action. Together they cover the everyday settings from Codex's [basic configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic), including models, reasoning, approval policy, permission profiles, sandboxing, web search, shell environment, and supported feature flags. Turning remote session context off stops Wirebot from adding its connector-aware instructions to Codex turns.
-
-Choices come from the running app-server and active configuration layers instead of a handwritten catalog. Codex itself is the validator: a save is a version-checked `config/batchWrite`, so all changes either pass Codex validation and land together or leave `config.toml` untouched. The app-server runs with `--strict-config`, so unknown configuration keys fail loudly.
-
-In **Settings → Model**, choose an available model (including GPT-6.1 Sol, GPT-6 Astra,
-GPT-6 Sol, and GPT-6 Luna). **Auto effort & speed** is on by default and reassesses
-each message using the full current Codex conversation, including previous turns.
-Slack mentions also include the entire Slack thread, including intervening human messages.
-In DMs, `new` starts a fresh context; messages before it are not replayed.
-
-| Request | Auto effort | Auto speed |
-|---|---|---|
-| Simple facts, translations | Low | Standard |
-| Ordinary questions | Medium | Standard |
-| Average tasks / complex work | High / Extra high | Standard |
-| Deep research / debugging | Ultra (or the model's highest supported level) | Standard |
-| Explicit request to work quickly | Appropriate to the task | Ultrafast, then Fast, then Standard, according to availability |
-
-Routing uses a separate, ephemeral **GPT-6.1 Sol / Low / Fast** turn through the
-existing Codex subscription sign-in, with host capabilities, tools, and MCP servers disabled.
-It consumes subscription usage. If the classifier is unavailable, times out, or fails,
-Wirebot uses local routing; a simple “continue” can reuse the last decision. The selected
-answering model stays unchanged. Scheduled runs keep their configured settings.
-Wirebot does not call the [Decisions API](https://developers.openai.com/api/docs/guides/decisions),
-which documents separate Platform API-key authentication and billing.
-
-Turn Auto off for manual reasoning and **Speed** controls. The toggle saves immediately
-and is also available in Slack/Discord in-chat settings; choosing a manual effort or speed
-there disables Auto. Fast and Ultrafast appear when Codex
-advertises them for that model and account; availability follows your plan and workspace
-settings. See [Codex speed modes](https://developers.openai.com/codex/speed) for usage
-and access details. **Ultra** reasoning and **Ultrafast** speed are separate controls.
-Switching models preserves compatible choices and resets unsupported reasoning or speed
-options to their defaults. The Slack and Discord in-chat settings follow the same rules.
-
-Wirebot keeps the running Codex process synchronized using the [app-server mechanisms designed for this purpose](https://learn.chatgpt.com/docs/app-server#api-overview):
-
-- Mini App saves hot-reload the effective user configuration and carry supported model, speed, approval, and reasoning choices into the next turn.
-- External edits to config files are applied on demand: send `/reload` or press **Apply changes** in the Mini App to run the same reconciliation. An invalid edit leaves the last healthy runtime active and shows a degraded status.
-- Skills use Codex's built-in watcher plus a forced `skills/list` refresh. Explicit `$skill-name` mentions are sent as native skill inputs.
-- MCP definitions use `config/mcpServer/reload`. Codex queues refreshed MCP state for loaded threads, so it becomes active on their next turn.
-
-The runtime card in the Mini App shows the current outcome and offers **Apply changes** and **Restart Codex**. `/reload` and `/restart` provide the same private-chat controls. Restart is the fallback for startup-only state: Wirebot pauses new turns, lets active turns finish, restarts its child app-server with the same `CODEX_HOME`, reloads its resources, and lazily resumes persisted thread IDs. It does not restart the messaging bridges or discard authentication and conversation history.
-
-If the app-server exits on its own — for example the kernel OOM-killer or a stray `kill -9` takes it out — Wirebot relaunches it automatically, retrying five times over roughly 50 seconds while new turns wait. Only when those attempts fail does the runtime stay degraded and ask for a manual `/restart`.
-
-### Message reactions
-
-Wirebot automatically connects a private localhost MCP server using MCP 2026-07-28.
-Its `react_to_last_message(reaction)` tool targets the message the active turn is answering.
-Routing uses Codex's thread/turn metadata; no message identifiers are added to prompts.
-The default messenger context encourages Codex to react when it fits the conversation.
-Empty answers send no reply, so a reaction can stand on its own; Slack and Discord progress
-messages are deleted when there is no final text.
-Wirebot preapproves all tools from its own MCP server. Other MCP tool approvals use
-the messenger's Allow once, Allow for session (when supported), and Deny buttons.
-Queued messages cannot retarget a running turn. Scheduled runs and calls after a turn
-ends have no reaction target.
-
-Reactions add the bot's emoji on Slack and Discord, and replace its single reaction on Telegram.
-Unsupported emoji and missing permissions return a tool error without substituting another emoji.
-Standard shortcodes use the bundled Emoji Mart Unicode 15 names and aliases (for example
-`:thumbsup:`, `:heart:`, and `:thumbsup::skin-tone-4:`); Unicode emoji can also be passed directly.
-Custom reactions accept Slack workspace `:names:`, Discord server `:names:` or `<:name:id>`
-(`<a:name:id>` for animated emoji), and Telegram `:custom_emoji_123456789:` when that chat permits it.
-Slack requires `reactions:write`; Discord requires Add Reactions and Read Message History.
-
-## Source development
-
-Requirements: [Bun](https://bun.com) 1.4 or newer.
+## Development
 
 ```sh
-git clone https://github.com/sadfun/wirebot.git
-cd wirebot
 bun install
-cp .env.example .env
-bun run dev
+bun run check      # tsc + biome
+bun test
+bun run build      # web app assets
+cp example.env .env && bun run dev
 ```
 
-Development commands:
+Requires Bun ≥ 1.4. The Agent SDK installs a native Claude Code binary for your platform as an optional dependency.
 
-```sh
-bun run check      # typecheck + biome
-bun run compile    # single-file executable in dist/wirebot
-docker build .     # the release image
-```
+On macOS, an explicit `CLAUDE_CONFIG_DIR` (the default here is `<data dir>/claude-home`) uses its own Keychain entry. For local runs, use `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, or set `CLAUDE_CONFIG_DIR=~/.claude` to reuse your own sign-in. That sign-in also carries your personal settings and hooks.
 
-Source runs keep Codex's `workspace-write` sandbox default and store state under `./.wirebot`. They download the pinned Codex CLI on first start; cloudflared and curl-impersonate are invoked from PATH, where the container image bakes the pinned builds. Without cloudflared (or `PUBLIC_URL`) the quick tunnel is skipped, and without curl-impersonate voice messages are forwarded to Codex untranscribed. The compiled executable embeds the app version, the Codex pin, and bytecode with maximum optimizations; Mini App assets and the pinned toolchains are baked into the image alongside it.
-
-The handwritten application is strict TypeScript. Messaging transports depend only on `src/core/channel.ts`; Telegram, Slack, and Discord implement the same contract.
-
-### Codex protocol updates
-
-Application updates and Codex protocol updates are intentionally separate. Each Wirebot release bundles the exact compatible Codex CLI version recorded in `codex.version`, fetched directly from the npm registry's platform tarball and verified against the registry integrity digest — no Node or npm involved.
-
-Maintainers can test a newer Codex protocol from a source checkout:
-
-```sh
-# Generate the candidate protocol and compile Wirebot against it.
-bun run codex:check
-
-# Apply it only after compatibility checks succeed.
-bun run codex:update
-```
-
-The check uses the candidate binary's `app-server generate-ts` output and compares the RPC surface; removed methods are never applied. Applying installs the bindings, typechecks the repository against them, and rolls the bindings back if the typecheck fails.
-
-### Publishing a release
-
-1. Update the version in `package.json`.
-2. Run `bun run check` and `bun run compile`.
-3. Push a matching tag such as `v0.2.0`.
-
-The Release workflow verifies the tag, runs the checks, builds the `linux/amd64` and `linux/arm64` images, and pushes them to `ghcr.io/sadfun/wirebot` tagged with the version and `latest` (prereleases skip `latest`).
-
-## Uninstall
-
-```sh
-docker compose down
-```
-
-After a [quick install](#quick-install), run that in `/opt/wirebot` and remove the updater too:
-
-```sh
-systemctl disable --now wirebot-updater && rm /etc/systemd/system/wirebot-updater.service
-```
-
-Removing the `wirebot-data` volume permanently deletes conversations, Codex configuration and login state, the workspace, and everything the agent installed into the persistent paths.
+Releases: bump `version` in `package.json`, then push a `v<version>` tag. The release workflow publishes `ghcr.io/nocell/wirebot-agent:<version>` and `:latest`.
 
 ## License
 
-Wirebot is released under the [MIT License](./LICENSE.md).
+MIT. Based on [Wirebot](https://github.com/sadfun/wirebot), © 2026 sadfun; see [LICENSE.md](LICENSE.md). Not affiliated with or endorsed by Anthropic or OpenAI. “Claude” is a trademark of Anthropic.

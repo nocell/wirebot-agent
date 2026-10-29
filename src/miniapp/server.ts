@@ -1,26 +1,18 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError, z } from "zod";
+import type { AgentConfigAccess } from "../agent/config.js";
+import { readSkillResource, SkillBrowserError } from "../agent/skill-browser.js";
 import { AutomationManagementError, type ScheduledRunsEngine } from "../automations/engine.js";
 import { RecurrenceError } from "../automations/recurrence.js";
 import {
   telegramConversationKey,
   telegramDeliveryTarget,
 } from "../channels/telegram/references.js";
-import {
-  type CodexConfigService,
-  ConfigValidationError,
-  type ConfigValidationIssue,
-} from "../codex/config-service.js";
-import { CodexRpcError } from "../codex/rpc.js";
-import type { CodexRuntimeService } from "../codex/runtime-service.js";
-import type { CodexService } from "../codex/service.js";
-import { SkillBrowserError } from "../codex/skill-browser.js";
-import { settingsPatchSchema, type WirebotSettingsStore } from "../core/settings-store.js";
-import type { GetAccountResponse } from "../generated/codex/v2/GetAccountResponse.js";
-import { BridgeError, errorMessage } from "../shared/errors.js";
+import { settingsPatchSchema } from "../core/settings-store.js";
+import { BridgeError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { wirebotVersion } from "../shared/version.js";
 import { validateTelegramInitData } from "./auth.js";
@@ -45,22 +37,28 @@ const staticAssets = new Map<string, StaticAsset>([
 ]);
 /** Browser deep links: a tab, optionally with a Settings page, skill name, or schedule id. */
 const appRoutePattern =
-  /^\/app\/(?:settings(?:\/(?:model|access|features|environment|remote))?|skills(?:\/[^/]+)?|schedules(?:\/[^/]+)?)\/?$/u;
+  /^\/app\/(?:settings(?:\/(?:model|access|remote))?|skills(?:\/[^/]+)?|schedules(?:\/[^/]+)?)\/?$/u;
 
 function staticAssetFor(pathname: string): StaticAsset | undefined {
   return staticAssets.get(pathname) ?? (appRoutePattern.test(pathname) ? htmlAsset : undefined);
 }
 
-const settingsUpdateSchema = z.strictObject({
-  expectedVersion: z.string().nullable(),
-  values: z.record(z.string(), z.unknown()),
-  wirebot: settingsPatchSchema.optional(),
-});
+/** One skill the agent can load, as listed in the Skills tab. */
+export interface AvailableSkill {
+  readonly name: string;
+  readonly description: string;
+  /** "bundled" skills ship with Wirebot as the `wirebot` plugin; "user" ones live in its config dir. */
+  readonly source: "user" | "bundled";
+}
 
-const applyBankedResetSchema = z.strictObject({
-  creditId: z.string().min(1).max(512),
-  idempotencyKey: z.string().min(1).max(128),
-});
+export interface SkillDirectorySource {
+  readonly source: "user" | "bundled";
+  readonly path: string;
+}
+
+interface LocatedSkill extends AvailableSkill {
+  readonly skillFile: string;
+}
 
 export interface MiniAppServerOptions {
   readonly host: string;
@@ -70,27 +68,12 @@ export interface MiniAppServerOptions {
     readonly allowedUserIds: ReadonlySet<number>;
   };
   readonly browserAuth?: BrowserAuth;
-  readonly codex: Pick<CodexService, "account" | "busy">;
-  readonly configService: Pick<CodexConfigService, "read" | "update" | "validate">;
-  readonly runtime: MiniAppRuntimeController;
-  readonly settings: Pick<WirebotSettingsStore, "read" | "update">;
+  readonly configService: AgentConfigAccess;
+  readonly skillDirectories: readonly SkillDirectorySource[];
   readonly logger: Logger;
   readonly assetDirectory?: string;
   readonly scheduledRuns?: MiniAppSchedulesController;
 }
-
-/** Narrow runtime surface exposed to the authenticated settings Mini App. */
-export type MiniAppRuntimeController = Pick<
-  CodexRuntimeService,
-  | "status"
-  | "usageLimits"
-  | "applyBankedReset"
-  | "skills"
-  | "browseSkill"
-  | "afterConfigWrite"
-  | "reload"
-  | "restart"
->;
 
 export type MiniAppSchedulesController = Pick<
   ScheduledRunsEngine,
@@ -103,9 +86,6 @@ export class MiniAppServer {
   readonly #assetDirectory: string;
   readonly #assetCache = new Map<string, Buffer>();
   #scheduledRuns: MiniAppSchedulesController | undefined;
-  #codexHealth: CodexHealth = "starting";
-  #healthRefresh: Promise<void> | undefined;
-  #healthTimer: NodeJS.Timeout | undefined;
   #started = false;
 
   public constructor(options: MiniAppServerOptions) {
@@ -156,9 +136,6 @@ export class MiniAppServer {
       this.#server.listen(this.options.port, this.options.host);
     });
     this.#started = true;
-    this.refreshCodexHealth();
-    this.#healthTimer = setInterval(() => this.refreshCodexHealth(), 30_000);
-    this.#healthTimer.unref();
     this.options.logger.info("Wirebot HTTP server listening", {
       host: this.options.host,
       port: this.serverUrl().port,
@@ -176,7 +153,6 @@ export class MiniAppServer {
 
   public async stop(): Promise<void> {
     if (!this.#started) return;
-    if (this.#healthTimer !== undefined) clearInterval(this.#healthTimer);
     await new Promise<void>((resolve, reject) => {
       this.#server.close((error) => {
         if (error === undefined) resolve();
@@ -191,12 +167,7 @@ export class MiniAppServer {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     if (request.method === "GET" && url.pathname === "/healthz") {
-      this.sendJson(response, 200, {
-        ok: true,
-        codex: this.#codexHealth,
-        // The auto-updater waits for this to stay false before recreating the container.
-        busy: this.options.codex.busy,
-      });
+      this.sendJson(response, 200, { ok: true });
       return;
     }
 
@@ -255,55 +226,16 @@ export class MiniAppServer {
       return;
     }
 
-    if (url.pathname === "/api/config/validate") {
-      if (request.method === "POST") {
-        const input = await this.readJson(request);
-        this.sendJson(response, 200, await this.options.configService.validate(input));
-        return;
-      }
-      this.methodNotAllowed(response, "POST");
-      return;
-    }
-
     if (url.pathname === "/api/config") {
       if (request.method === "GET") {
-        const snapshot = await this.options.configService.read();
-        this.sendJson(response, 200, {
-          ...snapshot,
-          wirebot: this.options.settings.read(),
-          runtime: this.options.runtime.status(),
-          wirebotVersion,
-        });
+        this.sendJson(response, 200, await this.configSnapshot());
         return;
       }
       if (request.method === "PUT") {
-        const { expectedVersion, values, wirebot } = settingsUpdateSchema.parse(
-          await this.readJson(request),
+        await this.options.configService.update(
+          settingsPatchSchema.parse(await this.readJson(request)),
         );
-        const writeOutcome =
-          Object.keys(values).length === 0
-            ? undefined
-            : await this.options.configService.update({ expectedVersion, values });
-        if (wirebot !== undefined) await this.options.settings.update(wirebot);
-        if (writeOutcome !== undefined) {
-          try {
-            await this.options.runtime.afterConfigWrite();
-          } catch (error) {
-            // The version-checked config write has already committed. Preserve that
-            // success and surface the runtime's degraded state in the response.
-            this.options.logger.warn("Codex resources did not fully refresh after config save", {
-              error: errorMessage(error),
-            });
-          }
-        }
-        const snapshot = await this.options.configService.read();
-        this.sendJson(response, 200, {
-          ...snapshot,
-          ...(writeOutcome === undefined ? {} : { writeOutcome }),
-          wirebot: this.options.settings.read(),
-          runtime: this.options.runtime.status(),
-          wirebotVersion,
-        });
+        this.sendJson(response, 200, await this.configSnapshot());
         return;
       }
       this.methodNotAllowed(response, "GET, PUT");
@@ -312,44 +244,26 @@ export class MiniAppServer {
 
     if (url.pathname === "/api/skills") {
       if (request.method === "GET") {
-        this.sendJson(response, 200, { skills: this.options.runtime.skills() });
+        const skills = await this.listSkills();
+        this.sendJson(response, 200, {
+          skills: skills.map(({ skillFile: _skillFile, ...skill }) => skill),
+        });
         return;
       }
       this.methodNotAllowed(response, "GET");
-      return;
-    }
-
-    if (url.pathname === "/api/usage") {
-      if (request.method === "GET") {
-        this.sendJson(response, 200, await this.options.runtime.usageLimits());
-        return;
-      }
-      this.methodNotAllowed(response, "GET");
-      return;
-    }
-
-    if (url.pathname === "/api/usage/reset") {
-      if (request.method === "POST") {
-        const input = applyBankedResetSchema.parse(await this.readJson(request));
-        const outcome = await this.options.runtime.applyBankedReset(
-          input.creditId,
-          input.idempotencyKey,
-        );
-        this.sendJson(response, 200, { outcome });
-        return;
-      }
-      this.methodNotAllowed(response, "POST");
       return;
     }
 
     if (url.pathname === "/api/skills/resource") {
       if (request.method === "GET") {
-        const skill = url.searchParams.get("skill");
-        if (skill === null || skill.length === 0) {
+        const name = url.searchParams.get("skill");
+        if (name === null || name.length === 0) {
           throw new HttpError(400, "A skill name is required.");
         }
+        const skill = (await this.listSkills()).find((candidate) => candidate.name === name);
+        if (skill === undefined) throw new HttpError(404, `Skill “${name}” was not found.`);
         const path = url.searchParams.get("path") ?? "";
-        this.sendJson(response, 200, await this.options.runtime.browseSkill(skill, path));
+        this.sendJson(response, 200, await readSkillResource(skill.skillFile, path));
         return;
       }
       this.methodNotAllowed(response, "GET");
@@ -396,18 +310,35 @@ export class MiniAppServer {
       return;
     }
 
-    if (url.pathname === "/api/runtime/reload" || url.pathname === "/api/runtime/restart") {
-      if (request.method === "POST") {
-        if (url.pathname.endsWith("/reload")) await this.options.runtime.reload();
-        else await this.options.runtime.restart();
-        this.sendJson(response, 200, { runtime: this.options.runtime.status() });
-        return;
-      }
-      this.methodNotAllowed(response, "POST");
-      return;
-    }
-
     this.sendError(response, 404, "Not found");
+  }
+
+  private async configSnapshot(): Promise<unknown> {
+    return { ...(await this.options.configService.read()), wirebotVersion };
+  }
+
+  /** Skills in each configured directory: `<dir>/<name>/SKILL.md` with YAML frontmatter. */
+  private async listSkills(): Promise<readonly LocatedSkill[]> {
+    const found: LocatedSkill[] = [];
+    for (const directory of this.options.skillDirectories) {
+      const entries = await readdir(directory.path, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+        const skillFile = join(directory.path, entry.name, "SKILL.md");
+        const contents = await readFile(skillFile, "utf8").catch(() => undefined);
+        if (contents === undefined) continue;
+        const metadata = skillFrontmatter(contents);
+        const name = metadata.name ?? entry.name;
+        found.push({
+          // Claude Code namespaces plugin skills with the plugin name.
+          name: directory.source === "bundled" ? `wirebot:${name}` : name,
+          description: metadata.description ?? "",
+          source: directory.source,
+          skillFile,
+        });
+      }
+    }
+    return found.toSorted((left, right) => left.name.localeCompare(right.name));
   }
 
   private async authenticate(request: IncomingMessage): Promise<AppPrincipal> {
@@ -462,23 +393,6 @@ export class MiniAppServer {
       "Set-Cookie",
       `__Host-wirebot_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${token === "" ? 0 : sessionLifetimeMs / 1_000}`,
     );
-  }
-
-  private refreshCodexHealth(): void {
-    if (this.#healthRefresh !== undefined) return;
-    const request = this.options.codex.account(true);
-    this.#healthRefresh = (async () => {
-      try {
-        this.#codexHealth = classifyCodexHealth(await Promise.race([request, healthTimeout()]));
-      } catch {
-        this.#codexHealth = "degraded";
-      }
-      // Keep the single-flight guard if the RPC itself outlives our health
-      // timeout; otherwise a wedged app-server would accumulate requests.
-      await request.catch(() => undefined);
-    })().finally(() => {
-      this.#healthRefresh = undefined;
-    });
   }
 
   private methodNotAllowed(response: ServerResponse, allow: string): void {
@@ -584,26 +498,6 @@ export class MiniAppServer {
       this.sendError(response, status, error.message);
       return;
     }
-    if (error instanceof ConfigValidationError) {
-      this.sendJson(response, 422, {
-        error: error.message,
-        issues: error.issues,
-      });
-      return;
-    }
-    if (error instanceof CodexRpcError) {
-      const code = configWriteErrorCode(error.data);
-      if (code === "configLayerReadonly") {
-        this.sendError(response, 403, error.message);
-        return;
-      }
-      if (code === "configValidationError") {
-        this.sendError(response, 422, error.message);
-        return;
-      }
-      this.sendError(response, code === "configVersionConflict" ? 409 : 502, error.message);
-      return;
-    }
     if (error instanceof BridgeError) {
       if (error.code === "MINIAPP_UNAUTHORIZED") {
         response.setHeader("WWW-Authenticate", "tma");
@@ -623,23 +517,18 @@ export class MiniAppServer {
   }
 }
 
-export type CodexHealth =
-  | "starting"
-  | "authenticated"
-  | "not_required"
-  | "needs_login"
-  | "degraded";
-
-export function classifyCodexHealth(status: GetAccountResponse): CodexHealth {
-  if (status.account !== null) return "authenticated";
-  return status.requiresOpenaiAuth ? "needs_login" : "not_required";
-}
-
-function healthTimeout(): Promise<never> {
-  return new Promise((_, reject) => {
-    const timer = setTimeout(() => reject(new Error("Codex health timed out")), 5_000);
-    timer.unref();
-  });
+/** `name` and `description` from a SKILL.md YAML frontmatter block; values on one line. */
+function skillFrontmatter(contents: string): { name?: string; description?: string } {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(contents);
+  if (match === null) return {};
+  const metadata: { name?: string; description?: string } = {};
+  for (const line of (match[1] ?? "").split(/\r?\n/u)) {
+    const field = /^(name|description):\s*(.*)$/u.exec(line);
+    if (field === null) continue;
+    const value = (field[2] ?? "").trim().replace(/^(["'])(.*)\1$/u, "$2");
+    if (value.length > 0) metadata[field[1] as "name" | "description"] = value;
+  }
+  return metadata;
 }
 
 function telegramScheduleScope(userId: number): AppPrincipal {
@@ -669,18 +558,18 @@ function scheduleIdFromPath(pathname: string): string {
   return z.string().trim().min(1).max(256).parse(decoded);
 }
 
+export interface ConfigValidationIssue {
+  readonly path: string;
+  readonly severity: "error" | "warning";
+  readonly message: string;
+}
+
 function normalizeZodIssues(error: ZodError): ConfigValidationIssue[] {
   return error.issues.map((issue) => ({
     path: issue.path.map((segment) => String(segment)).join("."),
     severity: "error",
     message: issue.message,
   }));
-}
-
-function configWriteErrorCode(data: unknown): string | undefined {
-  if (typeof data !== "object" || data === null) return undefined;
-  const code = (data as Record<string, unknown>).config_write_error_code;
-  return typeof code === "string" ? code : undefined;
 }
 
 class HttpError extends Error {

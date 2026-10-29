@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveOutboundAttachments } from "../src/codex/output-files.js";
+import { resolveOutboundAttachments } from "../src/agent/output-files.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -27,7 +27,6 @@ describe("resolveOutboundAttachments", () => {
 
     const resolution = await resolveOutboundAttachments(
       workspace,
-      join(root, "generated"),
       join(root, "staging"),
       [
         "[report](report.pdf)",
@@ -35,7 +34,6 @@ describe("resolveOutboundAttachments", () => {
         "[escaped](docs/a\\(1\\).pdf)",
         "[remote](https://example.com/file.txt)",
       ].join("\n"),
-      [],
     );
 
     expect(resolution.attachments.map(({ filename }) => filename)).toEqual([

@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
+import type { AgentService } from "../src/agent/service.js";
 import type { ScheduledRunsEngine } from "../src/automations/engine.js";
-import type { CodexService } from "../src/codex/service.js";
-import { CodexBridge } from "../src/core/bridge.js";
+import { WirebotBridge } from "../src/core/bridge.js";
 import type { InboundMessage, SendOptions } from "../src/core/channel.js";
 import { BrowserAuth } from "../src/miniapp/browser-auth.js";
 import { Logger } from "../src/shared/logger.js";
@@ -11,16 +11,13 @@ function setup(provider: string, command: string, admin = true, isPrivate = true
   const issue = mock(auth.issue.bind(auth));
   auth.issue = issue;
   const sendText = mock(async (_text: string, _options?: SendOptions) => {});
-  const bridge = new CodexBridge(
-    { onLoginCompleted: () => () => {} } as unknown as CodexService,
+  const bridge = new WirebotBridge(
+    {} as AgentService,
     "https://wirebot.example",
     new Logger("error"),
     {
-      status: () => {
-        throw new Error("unused");
-      },
-      reload: async () => {},
-      restart: async () => {},
+      auth: () => ({ kind: "apiKey", description: "an API key", subscription: false }),
+      modelSummary: () => "default",
     },
     {} as ScheduledRunsEngine,
     auth,

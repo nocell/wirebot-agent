@@ -25,7 +25,7 @@ import { PendingChoices } from "../choices.js";
 import { decodeCommandAction } from "../command-actions.js";
 import { reactToSlackMessage } from "../reactions.js";
 import { isWorkspaceMember } from "./authorization.js";
-import { type CodexConfigAccess, SlackConfigUi, slackConfigActionPrefix } from "./config-ui.js";
+import { type AgentConfigAccess, SlackConfigUi, slackConfigActionPrefix } from "./config-ui.js";
 import { downloadSlackFile, SlackFileDownloadError } from "./file.js";
 import { escapeSlackEntities } from "./format.js";
 import {
@@ -143,7 +143,7 @@ export class SlackChannel implements MessagingChannel {
     config: SlackConfig,
     attachmentDirectory: string,
     logger: Logger,
-    configAccess?: CodexConfigAccess,
+    configAccess?: AgentConfigAccess,
   ) {
     this.#botToken = config.botToken;
     this.#allowedUserIds = config.allowedUserIds;
@@ -243,7 +243,7 @@ export class SlackChannel implements MessagingChannel {
         return;
       }
       if (!inbound.address.isPrivate) {
-        await inbound.responder.sendText("Open Codex settings in a direct message with the bot.");
+        await inbound.responder.sendText("Open agent settings in a direct message with the bot.");
         return;
       }
       await this.#configUi.open(channelId);
@@ -429,7 +429,7 @@ export class SlackChannel implements MessagingChannel {
 
     const caption = [normalized.text, ...failures].filter((part) => part.length > 0).join("\n\n");
     // A bare file upload has no text; describe the attachments so the message
-    // still reaches Codex instead of being dropped after the download.
+    // still reaches the agent instead of being dropped after the download.
     const text =
       caption.length > 0
         ? caption
@@ -504,7 +504,7 @@ export class SlackChannel implements MessagingChannel {
 
   /**
    * Every mention sees the complete Slack thread, including intervening human
-   * discussion. DMs rely on the active Codex thread, which `new` resets.
+   * discussion. DMs rely on the active agent session, which `new` resets.
    * Commands stay bare — a context prefix would defeat command parsing.
    */
   private async withThreadContext(
@@ -601,7 +601,7 @@ export class SlackChannel implements MessagingChannel {
       // In channels every thread is its own conversation, and a slash command
       // carries no thread information, so these commands cannot pick a target.
       await respondEphemerally(
-        `In channels each thread is its own Codex conversation, so \`/wirebot ${name}\` cannot tell which one you mean. Mention the bot inside the thread instead (\`@Wirebot /${name}\`), or run it in a direct message with the bot.`,
+        `In channels each thread is its own agent conversation, so \`/wirebot ${name}\` cannot tell which one you mean. Mention the bot inside the thread instead (\`@Wirebot /${name}\`), or run it in a direct message with the bot.`,
       );
       return;
     }
@@ -668,7 +668,7 @@ export class SlackChannel implements MessagingChannel {
           .postEphemeral({
             channel: channelId,
             user: userId,
-            text: "Codex settings are limited to Wirebot admins.",
+            text: "Agent settings are limited to Wirebot admins.",
           })
           .catch(() => undefined);
         return;

@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentConfigSnapshot } from "../../src/agent/config.js";
 import { AutomationManagementError } from "../../src/automations/engine.js";
-import type { EditableConfigSnapshot } from "../../src/codex/config-service.js";
-import type { CodexRuntimeStatus } from "../../src/codex/runtime-service.js";
+import { settingsPatchSchema, type WirebotSettings } from "../../src/core/settings-store.js";
 import { type AppPrincipal, BrowserAuth } from "../../src/miniapp/browser-auth.js";
 import { MiniAppServer, type MiniAppServerOptions } from "../../src/miniapp/server.js";
 import { Logger } from "../../src/shared/logger.js";
@@ -13,47 +13,19 @@ export const testPrincipal: AppPrincipal = {
   conversation: { provider: "slack", resource: "conversation", id: "slack:D_ADMIN" },
   deliveryTarget: { provider: "slack", resource: "destination", id: "private-dm-target" },
 };
-export const snapshot: EditableConfigSnapshot = {
-  version: "test-version",
-  values: {
-    model: "test-model",
-    model_provider: null,
-    approval_policy: "on-request",
-    approvals_reviewer: "user",
-    sandbox_mode: "workspace-write",
-    default_permissions: null,
-    web_search: "live",
-    model_reasoning_effort: null,
-    model_reasoning_summary: null,
-    model_verbosity: null,
-    service_tier: null,
-    windows_sandbox: null,
-    shell_environment_include_only: null,
-    features: {},
-  },
-  capabilities: {
-    platform: "linux",
-    models: [
-      {
-        model: "test-model",
-        displayName: "Test model",
-        description: "A local fixture model",
-        supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced" }],
-        defaultReasoningEffort: "medium",
-        serviceTiers: [],
-        defaultServiceTier: null,
-        isDefault: true,
-      },
-    ],
-    modelProviders: [{ id: "openai", displayName: "OpenAI", description: "", allowed: true }],
-    permissionProfiles: [],
-    features: [],
-    requirements: null,
-  },
-  validation: { valid: true, issues: [] },
-};
 
-/** Exercises the real HTTP server; only the Codex/messenger services are local fakes. */
+function snapshotOf(settings: WirebotSettings): AgentConfigSnapshot {
+  return {
+    settings,
+    models: [
+      { value: "default", displayName: "Default", description: "", efforts: ["low", "high"] },
+    ],
+    defaultPermissionMode: "default",
+    auth: { kind: "apiKey", description: "a Claude Console API key", subscription: false },
+  };
+}
+
+/** Exercises the real HTTP server; only the agent/messenger services are local fakes. */
 export async function startTestApp(assetDirectory?: string, includeTelegram = false) {
   let admin = true;
   const auth = new BrowserAuth(
@@ -72,35 +44,19 @@ export async function startTestApp(assetDirectory?: string, includeTelegram = fa
     );
   }
   const scheduleScopes: unknown[][] = [];
-  const status: CodexRuntimeStatus = {
-    state: "ready",
-    restartRequired: false,
-    lastError: null,
-    lastAppliedAt: null,
-    configPath: "/test/config.toml",
+  let settings: WirebotSettings = {
+    remoteClientContext: true,
+    autoMode: true,
+    model: null,
+    effort: null,
+    permissionMode: null,
   };
-  const runtime = {
-    status: () => status,
-    usageLimits: async () => ({
-      weekly: { remainingPercent: 78, resetsAt: null },
-      fiveHour: { remainingPercent: 94, resetsAt: null },
-      bankedResets: null,
-    }),
-    skills: () => [
-      {
-        name: "workspace-guide",
-        description: "Work with your project files and development tools.",
-      },
-    ],
-    browseSkill: async () => {
-      throw new Error("Not used");
-    },
-    afterConfigWrite: async () => status,
-    reload: async () => status,
-    restart: async () => status,
-    applyBankedReset: async () => "nothingToReset" as const,
-  };
-  let wirebotSettings = { remoteClientContext: true, autoMode: true };
+  const skillsRoot = await mkdtemp(join(tmpdir(), "wirebot-skills-test-"));
+  await mkdir(join(skillsRoot, "workspace-guide"));
+  await Bun.write(
+    join(skillsRoot, "workspace-guide", "SKILL.md"),
+    "---\nname: workspace-guide\ndescription: Work with your project files.\n---\n\n# Guide\n",
+  );
   const server = new MiniAppServer({
     host: "127.0.0.1",
     port: 0,
@@ -109,25 +65,14 @@ export async function startTestApp(assetDirectory?: string, includeTelegram = fa
     ...(includeTelegram
       ? { telegramAuth: { botToken: "123456:TEST_BOT_TOKEN", allowedUserIds: new Set([42]) } }
       : {}),
-    codex: { account: async () => ({ account: null, requiresOpenaiAuth: false }), busy: false },
-    runtime,
     configService: {
-      read: async () => snapshot,
-      validate: async () => ({ valid: true, issues: [] }),
-      update: async () => ({
-        status: "ok",
-        version: "saved",
-        filePath: "/test/config.toml",
-        overriddenMetadata: null,
-      }),
-    },
-    settings: {
-      read: () => wirebotSettings,
+      read: async () => snapshotOf(settings),
       update: async (patch) => {
-        wirebotSettings = { ...wirebotSettings, ...(patch as Partial<typeof wirebotSettings>) };
-        return wirebotSettings;
+        settings = { ...settings, ...settingsPatchSchema.parse(patch) };
+        return snapshotOf(settings);
       },
     },
+    skillDirectories: [{ source: "user", path: skillsRoot }],
     scheduledRuns: {
       listForOwner: (owner) => {
         scheduleScopes.push([owner]);
@@ -159,6 +104,7 @@ export async function startTestApp(assetDirectory?: string, includeTelegram = fa
     },
     close: async () => {
       await server.stop();
+      await rm(skillsRoot, { recursive: true, force: true });
       if (ownedDirectory !== undefined) await rm(ownedDirectory, { recursive: true, force: true });
     },
   };

@@ -1,7 +1,6 @@
 import { resolve } from "node:path";
 import { z } from "zod";
 import type { LogLevel } from "../shared/logger.js";
-import { jwtPayload } from "../shared/text.js";
 
 const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(20).optional(),
@@ -22,33 +21,29 @@ const envSchema = z.object({
   WIREBOT_TUNNEL: z.enum(["auto", "off"]).default("auto"),
   WIREBOT_CONTAINER: z.enum(["0", "1"]).default("0"),
   WIREBOT_DATA_DIR: z.string().min(1).default(".wirebot"),
-  WIREBOT_TOOLCHAINS_DIR: z.string().min(1).optional(),
   WIREBOT_ASSETS_DIR: z.string().min(1).optional(),
-  CODEX_WORKSPACE: z.string().min(1).default(".wirebot/workspace"),
-  CODEX_API_KEY: z.string().min(1).optional(),
-  CODEX_CHATGPT_TOKEN: z.string().min(1).optional(),
-  CODEX_CHATGPT_ACCOUNT_ID: z.string().min(1).optional(),
+  WIREBOT_WORKSPACE: z.string().min(1).default(".wirebot/workspace"),
+  /** Path to the Claude Code binary; defaults to the one bundled with the Agent SDK. */
+  WIREBOT_CLAUDE_EXECUTABLE: z.string().min(1).optional(),
   HOST: z.string().min(1).default("127.0.0.1"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   /**
-   * Optional Slack token handed to Codex (as this same variable) so it can read
-   * Slack history on request. Unlike SLACK_BOT_TOKEN it is deliberately NOT
-   * bridge-only; it may be the bot token itself or a separate read-only app's.
+   * Optional Slack token the agent may use to read Slack history on request.
+   * Bridge-only as a variable: the bridge hands it to the agent as a file
+   * (see agent/slack-token.ts) so the subprocess credential scrub stays on.
+   * It may be the bot token itself or a separate read-only app's token.
    */
-  WIREBOT_CODEX_SLACK_TOKEN: z.string().startsWith("xox").optional(),
+  WIREBOT_SLACK_READ_TOKEN: z.string().startsWith("xox").optional(),
 });
 
 /**
  * Bridge-owned variables (credentials and channel wiring) that must never
- * reach Codex/npm/cloudflared subprocess environments. Kept next to the
+ * reach agent/npm/cloudflared subprocess environments. Kept next to the
  * schema so a new secret variable is scrubbed in the same edit that adds it;
  * `externalProcessEnvironment` in shared/environment.ts consumes this set.
  */
 export const bridgeOnlyEnvironmentKeys: ReadonlySet<keyof z.infer<typeof envSchema>> = new Set([
-  "CODEX_API_KEY",
-  "CODEX_CHATGPT_ACCOUNT_ID",
-  "CODEX_CHATGPT_TOKEN",
   "DISCORD_ADMIN_USER_IDS",
   "DISCORD_ALLOWED_USER_IDS",
   "DISCORD_BOT_TOKEN",
@@ -61,12 +56,8 @@ export const bridgeOnlyEnvironmentKeys: ReadonlySet<keyof z.infer<typeof envSche
   "TELEGRAM_API_BASE",
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_POLL_TIMEOUT",
+  "WIREBOT_SLACK_READ_TOKEN",
 ] as const);
-
-export interface ChatgptAuthConfig {
-  readonly accessToken: string;
-  readonly accountId: string;
-}
 
 export interface SlackConfig {
   readonly botToken: string;
@@ -75,7 +66,7 @@ export interface SlackConfig {
   readonly allowedUserIds: ReadonlySet<string>;
   /** `SLACK_ALLOWED_USER_IDS=*`: every regular member of the workspace. */
   readonly allowAllWorkspaceMembers: boolean;
-  /** When set, instance-wide commands (config, login, restart…) are limited to these users. */
+  /** When set, instance-wide commands (config, restart…) are limited to these users. */
   readonly adminUserIds: ReadonlySet<string> | undefined;
 }
 
@@ -87,7 +78,7 @@ export interface TelegramConfig {
 export interface DiscordConfig {
   readonly botToken: string;
   readonly allowedUserIds: ReadonlySet<string>;
-  /** When set, instance-wide commands (config, login, restart…) are limited to these users. */
+  /** When set, instance-wide commands (config, restart…) are limited to these users. */
   readonly adminUserIds: ReadonlySet<string> | undefined;
 }
 
@@ -101,16 +92,14 @@ export interface AppConfig {
   readonly tunnelMode: "auto" | "off";
   readonly container: boolean;
   readonly dataDirectory: string;
-  readonly toolchainsDirectory: string | undefined;
   readonly assetsDirectory: string | undefined;
   readonly workspace: string;
-  readonly codexApiKey: string | undefined;
-  readonly codexChatgptAuth: ChatgptAuthConfig | undefined;
+  readonly claudeExecutable: string | undefined;
   readonly host: string;
   readonly port: number;
   readonly logLevel: LogLevel;
-  /** Codex received WIREBOT_CODEX_SLACK_TOKEN and may read Slack history. */
-  readonly codexSlackAccess: boolean;
+  /** Token the agent may use to read Slack history, from WIREBOT_SLACK_READ_TOKEN. */
+  readonly slackReadToken: string | undefined;
 }
 
 export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -123,10 +112,6 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
       "Configure at least one connector: Telegram (TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_USER_IDS), Slack (SLACK_BOT_TOKEN + SLACK_APP_TOKEN + SLACK_ALLOWED_USER_IDS), or Discord (DISCORD_BOT_TOKEN + DISCORD_ALLOWED_USER_IDS)",
     );
   }
-  const codexChatgptAuth = resolveChatgptAuth(parsed);
-  if (parsed.CODEX_API_KEY !== undefined && codexChatgptAuth !== undefined) {
-    throw new Error("CODEX_API_KEY and CODEX_CHATGPT_TOKEN are mutually exclusive; set only one");
-  }
 
   return {
     telegram,
@@ -138,47 +123,18 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
     tunnelMode: parsed.WIREBOT_TUNNEL,
     container: parsed.WIREBOT_CONTAINER === "1",
     dataDirectory: resolve(parsed.WIREBOT_DATA_DIR),
-    toolchainsDirectory:
-      parsed.WIREBOT_TOOLCHAINS_DIR === undefined
-        ? undefined
-        : resolve(parsed.WIREBOT_TOOLCHAINS_DIR),
     assetsDirectory:
       parsed.WIREBOT_ASSETS_DIR === undefined ? undefined : resolve(parsed.WIREBOT_ASSETS_DIR),
-    workspace: resolve(parsed.CODEX_WORKSPACE),
-    codexApiKey: parsed.CODEX_API_KEY,
-    codexChatgptAuth,
+    workspace: resolve(parsed.WIREBOT_WORKSPACE),
+    claudeExecutable:
+      parsed.WIREBOT_CLAUDE_EXECUTABLE === undefined
+        ? undefined
+        : resolve(parsed.WIREBOT_CLAUDE_EXECUTABLE),
     host: parsed.HOST,
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,
-    codexSlackAccess: parsed.WIREBOT_CODEX_SLACK_TOKEN !== undefined,
+    slackReadToken: parsed.WIREBOT_SLACK_READ_TOKEN,
   };
-}
-
-function resolveChatgptAuth(parsed: z.infer<typeof envSchema>): ChatgptAuthConfig | undefined {
-  if (parsed.CODEX_CHATGPT_TOKEN === undefined) {
-    if (parsed.CODEX_CHATGPT_ACCOUNT_ID !== undefined) {
-      throw new Error("CODEX_CHATGPT_ACCOUNT_ID is set but CODEX_CHATGPT_TOKEN is not");
-    }
-    return undefined;
-  }
-  const accountId =
-    parsed.CODEX_CHATGPT_ACCOUNT_ID ?? chatgptAccountIdFromToken(parsed.CODEX_CHATGPT_TOKEN);
-  if (accountId === undefined) {
-    throw new Error(
-      "CODEX_CHATGPT_TOKEN carries no chatgpt_account_id claim; set CODEX_CHATGPT_ACCOUNT_ID as well",
-    );
-  }
-  return { accessToken: parsed.CODEX_CHATGPT_TOKEN, accountId };
-}
-
-function chatgptAccountIdFromToken(accessToken: string): string | undefined {
-  const claims = z
-    .object({
-      "https://api.openai.com/auth": z.object({ chatgpt_account_id: z.string().min(1) }).loose(),
-    })
-    .loose()
-    .safeParse(jwtPayload(accessToken));
-  return claims.success ? claims.data["https://api.openai.com/auth"].chatgpt_account_id : undefined;
 }
 
 function telegramConfigFromParsed(parsed: z.infer<typeof envSchema>): TelegramConfig | undefined {

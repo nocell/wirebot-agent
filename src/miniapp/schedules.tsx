@@ -519,8 +519,8 @@ function ScheduleEditor(props: ScheduleEditorProps): ReactElement {
         htmlFor="schedule-prompt"
         hint={
           existing?.kind === "heartbeat"
-            ? "The full prompt Codex receives on every run. This heartbeat continues its original Codex task."
-            : "The full prompt Codex receives on every run. Each run starts a fresh task."
+            ? "The full prompt Claude receives on every run. This heartbeat continues its original session."
+            : "The full prompt Claude receives on every run. Each run starts a fresh session."
         }
       >
         <ExpandableTextarea
@@ -833,7 +833,7 @@ function scheduleDraftsEqual(left: ScheduleDraft, right: ScheduleDraft): boolean
 
 function validateScheduleDraft(draft: ScheduleDraft): string | undefined {
   if (draft.name.trim().length === 0) return "Add a schedule name.";
-  if (draft.prompt.trim().length === 0) return "Add instructions for Codex.";
+  if (draft.prompt.trim().length === 0) return "Add instructions for Claude.";
   if (draft.timeZone.trim().length === 0) return "Add an IANA time zone, such as Europe/Warsaw.";
   if (["daily", "hourly", "minutely", "weekly"].includes(draft.cadence)) {
     const interval = Number(draft.interval);

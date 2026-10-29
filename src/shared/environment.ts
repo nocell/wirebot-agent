@@ -1,6 +1,6 @@
 import { bridgeOnlyEnvironmentKeys } from "../config/env.js";
 
-/** Build an environment for Codex/npm subprocesses without bridge credentials. */
+/** Build an environment for agent/npm subprocesses without bridge credentials. */
 export function externalProcessEnvironment(
   overrides: Readonly<NodeJS.ProcessEnv> = {},
 ): NodeJS.ProcessEnv {

@@ -1,30 +1,29 @@
 # syntax=docker/dockerfile:1
 
-# Build stage: compiles the Mini App assets, the wirebot executable, and
-# downloads the pinned Codex CLI for the target architecture. Runs on the
-# build platform and cross-compiles, so no emulation is needed here.
+# Build stage: compiles the Mini App assets. Runs on the build platform.
 FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
-ARG TARGETARCH
 WORKDIR /app
 
 COPY package.json bun.lock ./
 COPY patches ./patches
 RUN bun install --frozen-lockfile
 
-COPY codex.version tsconfig.json ./
+COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
-
 RUN bun run build
-RUN bun build --compile --minify --bytecode --sourcemap \
-      --define WIREBOT_COMPILED=true \
-      --target="bun-linux-$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64)" \
-      src/cli/main.ts --outfile dist/wirebot
-RUN bun scripts/bake-toolchains.ts /toolchains "$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64)"
 
-# Runtime stage: an Ubuntu machine for the agent. Wirebot and its pinned
-# toolchains live in the image under /opt/wirebot; everything the user should
-# keep across image updates lives in the /data volume, with /usr/local and
+# Dependency stage: production node_modules for the TARGET platform, so the
+# Agent SDK's optional dependency carries the matching Claude Code binary.
+FROM oven/bun:1.4.0 AS deps
+WORKDIR /app
+COPY package.json bun.lock ./
+COPY patches ./patches
+RUN bun install --frozen-lockfile --production
+
+# Runtime stage: an Ubuntu machine for the agent. Wirebot runs from source
+# under /opt/wirebot/app with the Bun runtime; everything the user should keep
+# across image updates lives in the /data volume, with /usr/local and
 # /home/linuxbrew symlinked into it.
 FROM ubuntu:24.04
 ARG TARGETARCH
@@ -43,32 +42,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && locale-gen en_US.UTF-8
 
-# Pinned quick-tunnel and voice-transcription binaries, verified against
-# GitHub's published SHA-256 digests (update versions and checksums together).
-# Wirebot invokes them from PATH and degrades gracefully when they are absent:
-# no quick tunnel without cloudflared, untranscribed voice messages without
-# curl-impersonate.
+# Pinned quick-tunnel binary, verified against the published SHA-256 digest
+# (update the version and checksums together). Wirebot invokes it from PATH
+# and works without it, minus the quick tunnel.
 RUN set -eu; \
     case "$TARGETARCH" in \
-      arm64) \
-        CLOUDFLARED_SHA=405df476437e027fc6d18729a5a77155c0a33a6082aeee60a799a688f3052e66; \
-        CURL_ASSET=curl-impersonate-v2.0.0.aarch64-linux-musl.tar.gz; \
-        CURL_SHA=38d3822a40db1897f4e1f2d763669dbce1e76019d9d884e615ce3500a0faca2c;; \
-      *) \
-        CLOUDFLARED_SHA=ec905ea7b7e327ff8abdde8cb64697a2152de74dbcdbf6aec9db8364eb3886cd; \
-        CURL_ASSET=curl-impersonate-v2.0.0.x86_64-linux-musl.tar.gz; \
-        CURL_SHA=0f3723efb8b5a8712104bcc9b6f617826f646b8efdcafa22b39ca6bc9820f2d0;; \
+      arm64) CLOUDFLARED_SHA=405df476437e027fc6d18729a5a77155c0a33a6082aeee60a799a688f3052e66;; \
+      *) CLOUDFLARED_SHA=ec905ea7b7e327ff8abdde8cb64697a2152de74dbcdbf6aec9db8364eb3886cd;; \
     esac; \
     mkdir -p /opt/wirebot/bin; \
     curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/2026.7.2/cloudflared-linux-${TARGETARCH}" \
       -o /opt/wirebot/bin/cloudflared; \
     echo "$CLOUDFLARED_SHA  /opt/wirebot/bin/cloudflared" | sha256sum -c -; \
-    curl -fsSL "https://github.com/lexiforest/curl-impersonate/releases/download/v2.0.0/${CURL_ASSET}" \
-      -o /tmp/curl-impersonate.tgz; \
-    echo "$CURL_SHA  /tmp/curl-impersonate.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/curl-impersonate.tgz --no-same-owner -C /opt/wirebot/bin curl-impersonate; \
-    rm /tmp/curl-impersonate.tgz; \
-    chmod 0755 /opt/wirebot/bin/cloudflared /opt/wirebot/bin/curl-impersonate
+    chmod 0755 /opt/wirebot/bin/cloudflared
 
 # The agent user owns /data and has passwordless sudo; the Wirebot install
 # under /opt/wirebot stays root-owned so the agent cannot corrupt it.
@@ -84,23 +70,24 @@ RUN mkdir -p /opt/wirebot/seed \
     && ln -s /data/usr-local /usr/local \
     && ln -s /data/linuxbrew /home/linuxbrew
 
-COPY --from=build /app/dist/wirebot /opt/wirebot/bin/wirebot
+COPY --from=deps /usr/local/bin/bun /opt/wirebot/bin/bun
+COPY --from=deps /app/node_modules /opt/wirebot/app/node_modules
 COPY --from=build /app/dist/miniapp/public /opt/wirebot/miniapp
-COPY --from=build /toolchains /opt/wirebot/toolchains
-COPY capabilities/skills /etc/codex/skills
+COPY package.json tsconfig.json /opt/wirebot/app/
+COPY src /opt/wirebot/app/src
+COPY capabilities /opt/wirebot/app/capabilities
 COPY docker/entrypoint.sh /opt/wirebot/bin/entrypoint.sh
-RUN chmod 0755 /opt/wirebot/bin/wirebot /opt/wirebot/bin/entrypoint.sh \
-    # The bake runs as root; the agent user only needs to read and execute.
-    && chmod -R a+rX /opt/wirebot/toolchains /opt/wirebot/miniapp /opt/wirebot/seed
+COPY docker/wirebot /opt/wirebot/bin/wirebot
+RUN chmod 0755 /opt/wirebot/bin/bun /opt/wirebot/bin/wirebot /opt/wirebot/bin/entrypoint.sh \
+    && chmod -R a+rX /opt/wirebot/app /opt/wirebot/miniapp /opt/wirebot/seed
 
 ENV WIREBOT_CONTAINER=1 \
     WIREBOT_DATA_DIR=/data \
-    CODEX_WORKSPACE=/data/workspace \
-    WIREBOT_TOOLCHAINS_DIR=/opt/wirebot/toolchains \
+    WIREBOT_WORKSPACE=/data/workspace \
     WIREBOT_ASSETS_DIR=/opt/wirebot/miniapp \
+    WIREBOT_CAPABILITIES_DIR=/opt/wirebot/app/capabilities \
     HOME=/data/home \
     HOST=0.0.0.0 \
-    CODEX_CHECK_UPDATES=false \
     LANG=en_US.UTF-8 \
     PATH=/opt/wirebot/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 

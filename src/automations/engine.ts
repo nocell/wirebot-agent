@@ -2,14 +2,14 @@ import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { unavailableAttachmentsWarning } from "../codex/output-files.js";
-import type { ApplicationContext } from "../codex/rpc.js";
+import type { ApplicationContext } from "../agent/context.js";
+import { unavailableAttachmentsWarning } from "../agent/output-files.js";
 import type {
-  CodexDynamicTool,
-  CodexDynamicToolContext,
-  CodexService,
-  CodexTurnResult,
-} from "../codex/service.js";
+  AgentService,
+  AgentTool,
+  AgentToolContext,
+  AgentTurnResult,
+} from "../agent/service.js";
 import {
   type DeliveryReceipt,
   type MessagingChannel,
@@ -17,7 +17,6 @@ import {
   type ProviderReference,
   sameReference,
 } from "../core/channel.js";
-import type { JsonValue } from "../generated/codex/serde_json/JsonValue.js";
 import { errorMessage } from "../shared/errors.js";
 import { ensureDirectory } from "../shared/fs.js";
 import type { Logger } from "../shared/logger.js";
@@ -131,16 +130,15 @@ export class AutomationManagementError extends Error {
   }
 }
 
-const automationUpdateSpec = {
-  type: "function",
+const automationUpdateTool = {
   name: "automation_update",
-  description: `Manage Wirebot scheduled runs. Use this whenever the user asks to schedule, repeat, monitor, remind, follow up later, list schedules, pause, resume, change, or delete a scheduled task. Use kind "heartbeat" to revisit this same Codex thread; use "cron" for a fresh persistent thread on every run. Wirebot accepts a bounded RFC 5545 RRULE subset: MINUTELY with INTERVAL; HOURLY with optional BYMINUTE; DAILY or WEEKLY with optional BYMINUTE, BYHOUR, and BYDAY; plus UNTIL, and WKST for WEEKLY. Use one line, no DTSTART, and keep BY lists small. New schedules and unfiltered lists bind to the current conversation; an existing schedule explicitly identified by id can be viewed, updated, or deleted from any conversation owned by the same authenticated user. Do not invent owners, destinations, or thread IDs.`,
-  inputSchema: toolJsonSchema(automationOperationSchema),
-} as const satisfies CodexDynamicTool["spec"];
+  description: `Manage Wirebot scheduled runs. Use this whenever the user asks to schedule, repeat, monitor, remind, follow up later, list schedules, pause, resume, change, or delete a scheduled task. Pass the request as \`operation\`, selected by its \`mode\`. Use kind "heartbeat" to revisit this same agent session; use "cron" for a fresh persistent session on every run. Wirebot accepts a bounded RFC 5545 RRULE subset: MINUTELY with INTERVAL; HOURLY with optional BYMINUTE; DAILY or WEEKLY with optional BYMINUTE, BYHOUR, and BYDAY; plus UNTIL, and WKST for WEEKLY. Use one line, no DTSTART, and keep BY lists small. New schedules and unfiltered lists bind to the current conversation; an existing schedule explicitly identified by id can be viewed, updated, or deleted from any conversation owned by the same authenticated user. Do not invent owners, destinations, or thread IDs.`,
+  inputSchema: { operation: automationOperationSchema },
+} as const satisfies Omit<AgentTool, "execute">;
 
 export interface ScheduledRunsEngineOptions {
   readonly store: AutomationStore;
-  readonly codex: CodexService;
+  readonly agent: AgentService;
   readonly channels: readonly MessagingChannel[];
   readonly workspace: string;
   readonly logger: Logger;
@@ -163,7 +161,7 @@ type LaneDecision =
 
 export class ScheduledRunsEngine {
   readonly #store: AutomationStore;
-  readonly #codex: CodexService;
+  readonly #agent: AgentService;
   readonly #channels: ReadonlyMap<string, MessagingChannel>;
   readonly #workspace: string;
   readonly #logger: Logger;
@@ -180,7 +178,7 @@ export class ScheduledRunsEngine {
 
   public constructor(options: ScheduledRunsEngineOptions) {
     this.#store = options.store;
-    this.#codex = options.codex;
+    this.#agent = options.agent;
     this.#channels = new Map(options.channels.map((channel) => [channel.name, channel]));
     this.#workspace = options.workspace;
     this.#logger = options.logger;
@@ -189,9 +187,10 @@ export class ScheduledRunsEngine {
     this.#maxConcurrency = options.maxConcurrency ?? 3;
     this.#now = options.now ?? (() => new Date());
     this.#createId = options.createId ?? (() => crypto.randomUUID());
-    this.#codex.registerDynamicTool({
-      spec: automationUpdateSpec,
-      execute: async (argumentsValue, context) => await this.executeTool(argumentsValue, context),
+    this.#agent.registerTool({
+      ...automationUpdateTool,
+      execute: async (argumentsValue, context) =>
+        await this.executeTool(argumentsValue.operation, context),
     });
   }
 
@@ -241,7 +240,7 @@ export class ScheduledRunsEngine {
       if (this.#tickInProgress !== undefined) await this.#tickInProgress;
       await this.waitForIdle();
     })();
-    await this.#codex.interruptScheduledTurns();
+    await this.#agent.interruptScheduledTurns();
     await drained;
   }
 
@@ -335,7 +334,7 @@ export class ScheduledRunsEngine {
     return {
       "wirebot.scheduled-result": {
         kind: "application",
-        value: `The user is replying to a Wirebot scheduled-run notification. The quoted provider message may be truncated; this is the complete stored result. Do not imply that another Codex thread is the current thread.\n\nAutomation: ${automation.name}\nRun ID: ${notification.runId}\nSource thread: ${notification.sourceThreadId ?? "unavailable"}\nTitle: ${notification.title ?? automation.name}\nResult:\n${notification.body ?? "(no result text)"}`,
+        value: `The user is replying to a Wirebot scheduled-run notification. The quoted provider message may be truncated; this is the complete stored result. Do not imply that another agent session is the current session.\n\nAutomation: ${automation.name}\nRun ID: ${notification.runId}\nSource thread: ${notification.sourceThreadId ?? "unavailable"}\nTitle: ${notification.title ?? automation.name}\nResult:\n${notification.body ?? "(no result text)"}`,
       },
     };
   }
@@ -354,9 +353,9 @@ export class ScheduledRunsEngine {
         .listNotifications(run.id)
         .find((notification) => notification.sourceThreadId !== null)?.sourceThreadId;
     if (sourceThreadId === undefined || sourceThreadId === null) {
-      throw new Error("The scheduled run has no resumable Codex task");
+      throw new Error("The scheduled run has no resumable agent session");
     }
-    const changed = await this.#codex.activateConversationThread(
+    const changed = await this.#agent.activateConversationThread(
       conversation.id,
       conversation.provider,
       sourceThreadId,
@@ -455,7 +454,7 @@ export class ScheduledRunsEngine {
           reason: "The messaging provider no longer authorizes this schedule's owner.",
         };
       }
-      const decision = this.#codex.tryAcquireBackground(automation.conversation.id);
+      const decision = this.#agent.tryAcquireBackground(automation.conversation.id);
       return decision.acquired
         ? { acquired: true, release: decision.release }
         : { acquired: false, reason: decision.reason, retryAt: decision.retryAt };
@@ -684,10 +683,7 @@ export class ScheduledRunsEngine {
     return updated;
   }
 
-  private async executeTool(
-    argumentsValue: unknown,
-    context: CodexDynamicToolContext,
-  ): Promise<unknown> {
+  private async executeTool(argumentsValue: unknown, context: AgentToolContext): Promise<unknown> {
     const operation = automationOperationSchema.parse(argumentsValue);
     const owner = context.owner;
     if (owner === undefined) throw new Error("Scheduled runs require an authenticated user");
@@ -734,11 +730,11 @@ export class ScheduledRunsEngine {
     automation: AutomationDefinition,
     run: AutomationRun,
   ): Promise<string> {
-    let result: CodexTurnResult | undefined;
+    let result: AgentTurnResult | undefined;
     try {
       const memoryPath = await this.ensureMemoryFile(automation.id);
       const prompt = scheduledPrompt(automation, run, memoryPath, this.currentDate());
-      result = await this.#codex.runScheduledTurn({
+      result = await this.#agent.runScheduledTurn({
         conversationKey: automation.conversation.id,
         connector: automation.conversation.provider,
         prompt,
@@ -904,9 +900,9 @@ export class ScheduledRunsEngine {
   }
 }
 
-function toolJsonSchema(schema: z.ZodType): JsonValue {
+function toolJsonSchema(schema: z.ZodType): Record<string, unknown> {
   const { $schema: _$schema, ...jsonSchema } = z.toJSONSchema(schema);
-  return jsonSchema as JsonValue;
+  return jsonSchema;
 }
 
 function stableAutomationId(...parts: readonly string[]): string {
@@ -998,7 +994,7 @@ Read the memory file before doing the work. Update it with concise durable conte
 }
 
 function scheduledDeveloperInstructions(memoryPath: string): string {
-  return `You are running an unattended Wirebot scheduled task, following the Codex Desktop automation model. Read ${memoryPath} before each run and update it with concise durable context before finishing. Do not ask the user questions or wait for interactive approval. Your final response must follow the supplied output schema.`;
+  return `You are running an unattended Wirebot scheduled task, Read ${memoryPath} before each run and update it with concise durable context before finishing. Do not ask the user questions or wait for interactive approval. Your final response must follow the supplied output schema.`;
 }
 
 function notificationText(title: string, message: string): string {

@@ -1,32 +1,32 @@
 #!/bin/sh
-# Wirebot installer — https://github.com/sadfun/wirebot
+# Wirebot installer — https://github.com/nocell/wirebot-agent
 #
-#   curl -fsSL https://raw.githubusercontent.com/sadfun/wirebot/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/nocell/wirebot-agent/main/install.sh | sudo sh
 #
 # Interactive by default. Pass --yes plus flags (or the matching environment
 # variables) for an unattended install: see --help. Safe to re-run; it keeps
 # what is already in the install directory's .env.
 set -eu
 
-IMAGE=${WIREBOT_IMAGE:-ghcr.io/sadfun/wirebot:latest}
+IMAGE=${WIREBOT_IMAGE:-ghcr.io/nocell/wirebot-agent:latest}
 DIR=${WIREBOT_DIR:-/opt/wirebot}
 TG_API=${TELEGRAM_API_BASE:-https://api.telegram.org}
 
 # Settings the installer owns in .env. Every other line of an existing .env is
 # preserved. Each can also arrive through the environment or a flag.
 MANAGED="TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_USER_IDS SLACK_BOT_TOKEN SLACK_APP_TOKEN
-SLACK_ALLOWED_USER_IDS DISCORD_BOT_TOKEN DISCORD_ALLOWED_USER_IDS PUBLIC_URL CODEX_API_KEY
-CODEX_CHATGPT_TOKEN"
+SLACK_ALLOWED_USER_IDS DISCORD_BOT_TOKEN DISCORD_ALLOWED_USER_IDS PUBLIC_URL ANTHROPIC_API_KEY
+CLAUDE_CODE_USE_BEDROCK AWS_REGION CLAUDE_CODE_OAUTH_TOKEN"
 for key in $MANAGED; do eval "$key=\${$key:-}"; done
 
-AUTO=0 LOGIN=1 AUTO_UPDATE=1 CADDY='' SELF_TEST=0
-STEP=0 STEPS=7 DOMAIN='' PROXIED=0 TG_BOT='' SLACK_TEAM='' DISCORD_APP='' DISCORD_APP_ID=''
+AUTO=0 CREDENTIAL=1 AUTO_UPDATE=1 CADDY='' SELF_TEST=0
+STEP=0 STEPS=7 DOMAIN='' CLAUDE_VIA='' CLAUDE_CHOICE='' PROXIED=0 TG_BOT='' SLACK_TEAM='' DISCORD_APP='' DISCORD_APP_ID=''
 HTTP_CODE='' HTTP_BODY='' REPLY='' ERR='' SPIN_HINT='' SPIN_QUIET=0
 BOLD='' DIM='' RED='' GREEN='' YELLOW='' CYAN='' RESET='' FANCY=0 G_FAIL=x
 NL='
 '
 
-SLACK_MANIFEST_URL='https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%7B%22name%22%3A%22Wirebot%22%2C%22description%22%3A%22Codex%20in%20your%20Slack%22%2C%22background_color%22%3A%22%231a1d21%22%7D%2C%22features%22%3A%7B%22app_home%22%3A%7B%22messages_tab_enabled%22%3Atrue%2C%22messages_tab_read_only_enabled%22%3Afalse%7D%2C%22bot_user%22%3A%7B%22display_name%22%3A%22Wirebot%22%2C%22always_online%22%3Atrue%7D%2C%22slash_commands%22%3A%5B%7B%22command%22%3A%22%2Fwirebot%22%2C%22description%22%3A%22Control%20Wirebot%20%28new%2C%20stop%2C%20status%2C%20help%E2%80%A6%29%22%2C%22usage_hint%22%3A%22new%20%7C%20back%20%7C%20stop%20%7C%20compact%20%7C%20schedules%20%7C%20status%20%7C%20help%22%2C%22should_escape%22%3Afalse%7D%5D%7D%2C%22oauth_config%22%3A%7B%22scopes%22%3A%7B%22bot%22%3A%5B%22chat%3Awrite%22%2C%22im%3Ahistory%22%2C%22channels%3Ahistory%22%2C%22groups%3Ahistory%22%2C%22mpim%3Ahistory%22%2C%22files%3Aread%22%2C%22files%3Awrite%22%2C%22users%3Aread%22%2C%22commands%22%5D%7D%7D%2C%22settings%22%3A%7B%22event_subscriptions%22%3A%7B%22bot_events%22%3A%5B%22message.channels%22%2C%22message.groups%22%2C%22message.im%22%2C%22message.mpim%22%5D%7D%2C%22interactivity%22%3A%7B%22is_enabled%22%3Atrue%7D%2C%22org_deploy_enabled%22%3Afalse%2C%22socket_mode_enabled%22%3Atrue%2C%22token_rotation_enabled%22%3Afalse%7D%7D'
+SLACK_MANIFEST_URL='https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%7B%22name%22%3A%22Wirebot%22%2C%22description%22%3A%22An%20AI%20agent%20in%20your%20Slack%22%2C%22background_color%22%3A%22%231a1d21%22%7D%2C%22features%22%3A%7B%22app_home%22%3A%7B%22messages_tab_enabled%22%3Atrue%2C%22messages_tab_read_only_enabled%22%3Afalse%7D%2C%22bot_user%22%3A%7B%22display_name%22%3A%22Wirebot%22%2C%22always_online%22%3Atrue%7D%2C%22slash_commands%22%3A%5B%7B%22command%22%3A%22%2Fwirebot%22%2C%22description%22%3A%22Control%20Wirebot%20%28new%2C%20stop%2C%20status%2C%20help%E2%80%A6%29%22%2C%22usage_hint%22%3A%22new%20%7C%20back%20%7C%20stop%20%7C%20compact%20%7C%20schedules%20%7C%20status%20%7C%20help%22%2C%22should_escape%22%3Afalse%7D%5D%7D%2C%22oauth_config%22%3A%7B%22scopes%22%3A%7B%22bot%22%3A%5B%22chat%3Awrite%22%2C%22reactions%3Awrite%22%2C%22im%3Ahistory%22%2C%22channels%3Ahistory%22%2C%22groups%3Ahistory%22%2C%22mpim%3Ahistory%22%2C%22files%3Aread%22%2C%22files%3Awrite%22%2C%22users%3Aread%22%2C%22commands%22%5D%7D%7D%2C%22settings%22%3A%7B%22event_subscriptions%22%3A%7B%22bot_events%22%3A%5B%22message.channels%22%2C%22message.groups%22%2C%22message.im%22%2C%22message.mpim%22%5D%7D%2C%22interactivity%22%3A%7B%22is_enabled%22%3Atrue%7D%2C%22org_deploy_enabled%22%3Afalse%2C%22socket_mode_enabled%22%3Atrue%2C%22token_rotation_enabled%22%3Afalse%7D%7D'
 # View Channels, Send Messages, Read Message History, Create Public Threads,
 # Send Messages in Threads: the set docs/discord.md asks for.
 DISCORD_PERMISSIONS=309237713920
@@ -39,7 +39,7 @@ Usage: install.sh [options]
 
   -y, --yes                     Unattended: never prompt, take everything from flags/env
       --dir DIR                 Install directory (default /opt/wirebot)
-      --image IMAGE             Image to run (default ghcr.io/sadfun/wirebot:latest)
+      --image IMAGE             Image to run (default ghcr.io/nocell/wirebot-agent:latest)
 
 Messengers: at least one with --yes. Every flag also reads the environment
 variable shown, which keeps secrets out of the process list.
@@ -51,11 +51,18 @@ variable shown, which keeps secrets out of the process list.
       --discord-token T         DISCORD_BOT_TOKEN
       --discord-user-ids IDS    DISCORD_ALLOWED_USER_IDS   (comma-separated snowflakes)
 
-Codex sign-in: the wizard runs the ChatGPT device-code login. With --yes it is
-skipped unless a credential is given; send /login to the bot afterwards.
-      --codex-api-key KEY       CODEX_API_KEY
-      --codex-chatgpt-token T   CODEX_CHATGPT_TOKEN
-      --no-login                Skip sign-in
+Claude credential: exactly one. There is no sign-in from the chat; without a
+credential the bot answers every message with setup instructions.
+      --anthropic-api-key KEY   ANTHROPIC_API_KEY  (Claude Console; required when
+                                several people use the bot)
+      --bedrock                 CLAUDE_CODE_USE_BEDROCK=1: Amazon Bedrock, with AWS
+                                credentials from an instance role or lines you
+                                add to .env yourself
+      --aws-region REGION       AWS_REGION for Bedrock (default us-east-1)
+      --claude-oauth-token T    CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`.
+                                Personal Pro/Max plan: Anthropic's terms allow it
+                                only for your own single-user bot
+      --no-credential           Skip this step
 
 Web app:
       --public-url URL          PUBLIC_URL, e.g. https://bot.example.com
@@ -77,11 +84,11 @@ setup_ui() {
   fi
   case ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} in
     *[Uu][Tt][Ff]8* | *[Uu][Tt][Ff]-8*)
-      G_OK='✔' G_FAIL='✖' G_WARN='▲' G_INFO='›' G_FULL='━' G_EMPTY='─' G_PIPE='│'
+      G_OK='✔' G_FAIL='✖' G_WARN='▲' G_INFO='›' G_FULL='━' G_EMPTY='─'
       FRAMES='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏'
       ;;
     *)
-      G_OK='ok' G_FAIL='x' G_WARN='!' G_INFO='>' G_FULL='#' G_EMPTY='-' G_PIPE='|'
+      G_OK='ok' G_FAIL='x' G_WARN='!' G_INFO='>' G_FULL='#' G_EMPTY='-'
       FRAMES='| / - \'
       ;;
   esac
@@ -115,7 +122,7 @@ step() {
 }
 
 banner() {
-  printf '\n  %s%sWirebot%s  Codex in your messenger\n' "$BOLD" "$CYAN" "$RESET"
+  printf '\n  %s%sWirebot%s  an agent powered by Claude, in your messenger\n' "$BOLD" "$CYAN" "$RESET"
   printf '  %sThis wizard installs Wirebot into %s and takes about five minutes.%s\n' "$DIM" "$DIR" "$RESET"
 }
 
@@ -215,12 +222,14 @@ retry() {
 
 # ── HTTP + the little JSON we need ───────────────────────────────────────────
 
-# call URL [HEADER] [POST-DATA] → HTTP_CODE, HTTP_BODY. The URL and header go
+# call URL [HEADERS] [POST-DATA] → HTTP_CODE, HTTP_BODY. HEADERS holds one per line. The URL and header go
 # through a curl config on stdin so tokens never appear in the process list.
 http() {
   {
     printf 'url = "%s"\n' "$1"
-    [ -z "${2:-}" ] || printf 'header = "%s"\n' "$2"
+    [ -z "${2:-}" ] || printf '%s\n' "$2" | while IFS= read -r http_header; do
+      printf 'header = "%s"\n' "$http_header"
+    done
     [ "$#" -lt 3 ] || printf 'data = "%s"\n' "$3"
   } | curl -sS -K - --max-time 25 -w '\n%{http_code}' 2>/dev/null || printf '\n000'
 }
@@ -260,7 +269,8 @@ parse_args() {
     esac
     case $1 in
       -y | --yes | --non-interactive) AUTO=1 ;;
-      --no-login) LOGIN=0 ;;
+      --no-credential) CREDENTIAL=0 ;;
+      --bedrock) CLAUDE_CODE_USE_BEDROCK=1 ;;
       --no-auto-update) AUTO_UPDATE=0 ;;
       --caddy) CADDY=1 ;;
       --no-caddy) CADDY=0 ;;
@@ -269,16 +279,17 @@ parse_args() {
         usage
         exit 0
         ;;
-      --dir | --image | --public-url | --codex-api-key | --codex-chatgpt-token | --telegram-token | \
-        --telegram-user-ids | --slack-bot-token | --slack-app-token | --slack-user-ids | \
+      --dir | --image | --public-url | --anthropic-api-key | --aws-region | --claude-oauth-token | \
+        --telegram-token | --telegram-user-ids | --slack-bot-token | --slack-app-token | --slack-user-ids | \
         --discord-token | --discord-user-ids)
         [ $# -ge 2 ] || die "$1 needs a value."
         case $1 in
           --dir) DIR=$2 ;;
           --image) IMAGE=$2 ;;
           --public-url) PUBLIC_URL=$2 ;;
-          --codex-api-key) CODEX_API_KEY=$2 ;;
-          --codex-chatgpt-token) CODEX_CHATGPT_TOKEN=$2 ;;
+          --anthropic-api-key) ANTHROPIC_API_KEY=$2 ;;
+          --aws-region) AWS_REGION=$2 ;;
+          --claude-oauth-token) CLAUDE_CODE_OAUTH_TOKEN=$2 ;;
           --telegram-token) TELEGRAM_BOT_TOKEN=$2 ;;
           --telegram-user-ids) TELEGRAM_ALLOWED_USER_IDS=$2 ;;
           --slack-bot-token) SLACK_BOT_TOKEN=$2 ;;
@@ -306,8 +317,16 @@ preflight() {
   command -v curl >/dev/null 2>&1 || die "curl is required. Install it and run again."
   [ "$AUTO" = 1 ] || (: </dev/tty) 2>/dev/null ||
     die "No terminal to ask questions on. Use --yes with flags; see --help."
-  [ -z "$CODEX_API_KEY" ] || [ -z "$CODEX_CHATGPT_TOKEN" ] ||
-    die "CODEX_API_KEY and CODEX_CHATGPT_TOKEN are mutually exclusive."
+  credentials=0
+  for credential in "$ANTHROPIC_API_KEY" "$CLAUDE_CODE_USE_BEDROCK" "$CLAUDE_CODE_OAUTH_TOKEN"; do
+    [ -z "$credential" ] || credentials=$((credentials + 1))
+  done
+  [ "$credentials" -le 1 ] ||
+    die "Give one Claude credential: an API key, --bedrock, or a subscription token."
+  # A credential given now wins over a different one in an existing .env.
+  if [ -n "$ANTHROPIC_API_KEY" ]; then CLAUDE_CHOICE=api; fi
+  if [ -n "$CLAUDE_CODE_USE_BEDROCK" ]; then CLAUDE_CHOICE=bedrock; fi
+  if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then CLAUDE_CHOICE=plan; fi
 }
 
 ensure_docker() {
@@ -420,43 +439,185 @@ pull_image() {
   SPIN_HINT=''
 }
 
-# Runs the image's pinned Codex CLI as the agent user against the data volume,
-# which is exactly where Wirebot looks for the login afterwards.
-codex_in_image() {
-  docker compose run --rm --no-deps -T --entrypoint sh wirebot -c '
-    mkdir -p /data/home /data/codex-home
-    chown wirebot:wirebot /data /data/home /data/codex-home
-    exec setpriv --reuid wirebot --regid wirebot --init-groups \
-      env CODEX_HOME=/data/codex-home /opt/wirebot/toolchains/*/vendor/*/bin/codex "$@"' sh "$@"
+# ── Claude credential ────────────────────────────────────────────────────────
+
+# Credentials the installer does not manage but Claude Code also accepts.
+other_credential() {
+  [ -f .env ] && grep -Eq '^(CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN)=.' .env
 }
 
-codex_login() {
-  if [ -n "$CODEX_API_KEY$CODEX_CHATGPT_TOKEN" ]; then
-    ok "Codex signs in from the credential in .env on every start."
-    return
-  fi
-  if codex_in_image login status >/dev/null 2>&1; then
-    ok "Already signed in to Codex."
-    return
-  fi
-  if [ "$LOGIN" = 0 ] || [ "$AUTO" = 1 ]; then
-    info "Skipped. Send /login to the bot once it is running."
-    return
-  fi
-  say "Wirebot uses your ChatGPT plan: no API key needed. Open the link below in any"
-  say "browser, sign in, and enter the one-time code. This waits until you are done."
-  say "${DIM}If ChatGPT refuses the code, enable device code login under Settings > Security.$RESET"
-  while :; do
-    printf '\n'
-    codex_in_image login --device-auth 2>&1 | sed "s/^/  $DIM$G_PIPE$RESET /" || true
-    printf '\n'
-    if codex_in_image login status >/dev/null 2>&1; then
-      ok "Signed in to Codex."
-      return
-    fi
-    confirm "Sign-in did not complete. Try again?" Y || break
+# How many people may talk to the bot: 0 one person, 1 maybe several (one ID on
+# each of several messengers, which may all be the same person), 2 several.
+sharing() {
+  sharing_level=0 sharing_messengers=0
+  for sharing_ids in "$TELEGRAM_ALLOWED_USER_IDS" "$SLACK_ALLOWED_USER_IDS" "$DISCORD_ALLOWED_USER_IDS"; do
+    [ -n "$sharing_ids" ] || continue
+    sharing_messengers=$((sharing_messengers + 1))
+    case $sharing_ids in
+      *'*'* | *,*) sharing_level=2 ;;
+    esac
   done
-  info "Skipped. Send /login to the bot once it is running."
+  [ "$sharing_level" = 2 ] || [ "$sharing_messengers" -le 1 ] || sharing_level=1
+  echo "$sharing_level"
+}
+
+check_anthropic() {
+  token_shaped "$ANTHROPIC_API_KEY" || {
+    ERR="That does not look like an API key. Copy it exactly from the Claude Console."
+    return 1
+  }
+  call https://api.anthropic.com/v1/models "x-api-key: $ANTHROPIC_API_KEY${NL}anthropic-version: 2023-06-01"
+  case $HTTP_CODE in
+    200) ;;
+    401 | 403)
+      ERR="Anthropic rejected this API key. Copy it exactly from the Claude Console."
+      return 1
+      ;;
+    *)
+      ERR="The Anthropic API is unreachable (HTTP $HTTP_CODE). Try again."
+      return 1
+      ;;
+  esac
+}
+
+setup_api_key() {
+  if [ -z "$ANTHROPIC_API_KEY" ]; then
+    say "Create a key in the Claude Console (usage is billed to its organization):"
+    link "https://platform.claude.com/settings/keys"
+    printf '\n'
+  fi
+  while :; do
+    if [ -z "$ANTHROPIC_API_KEY" ]; then
+      ask_secret "Claude API key"
+      ANTHROPIC_API_KEY=$REPLY
+    fi
+    ! check_anthropic || break
+    retry "$ERR"
+    ANTHROPIC_API_KEY=''
+  done
+  CLAUDE_VIA='a Claude API key' CLAUDE_CODE_USE_BEDROCK='' CLAUDE_CODE_OAUTH_TOKEN=''
+  ok "The API key works."
+}
+
+setup_bedrock() {
+  CLAUDE_CODE_USE_BEDROCK=1
+  while :; do
+    if [ -z "$AWS_REGION" ]; then
+      if [ "$AUTO" = 1 ]; then AWS_REGION=us-east-1; else
+        ask "AWS region with Claude enabled in Bedrock" us-east-1
+        AWS_REGION=$REPLY
+      fi
+    fi
+    ! matches "$AWS_REGION" '^[a-z]{2}(-[a-z]+)+-[0-9]+$' || break
+    retry "\"$AWS_REGION\" is not an AWS region like us-east-1."
+    AWS_REGION=''
+  done
+  CLAUDE_VIA="Amazon Bedrock ($AWS_REGION)" ANTHROPIC_API_KEY='' CLAUDE_CODE_OAUTH_TOKEN=''
+  ok "Claude runs through Amazon Bedrock in $AWS_REGION."
+  if [ -f .env ] && grep -Eq '^(AWS_ACCESS_KEY_ID|AWS_PROFILE|AWS_BEARER_TOKEN_BEDROCK)=.' .env; then
+    info "Using the AWS credentials already in $DIR/.env."
+  else
+    say "AWS credentials come from this server: an instance role (on EC2 with IMDSv2, set"
+    say "the metadata hop limit to 2 so the container can reach it), or AWS_ACCESS_KEY_ID and"
+    say "AWS_SECRET_ACCESS_KEY lines you add to $DIR/.env yourself; the installer keeps them."
+  fi
+}
+
+subscription_warning() {
+  warn "A personal Claude plan is for your own use only."
+  say "Anthropic's terms allow a Free, Pro or Max subscription only for you, on a bot"
+  say "nobody else talks to. Use an API key or Amazon Bedrock for a bot others can use."
+}
+
+setup_subscription() {
+  case $(sharing) in
+    2)
+      ERR="Several people may use this bot, so a personal Claude plan is not allowed. Use an API key or Amazon Bedrock."
+      CLAUDE_CODE_OAUTH_TOKEN=''
+      [ "$AUTO" != 1 ] || die "$ERR"
+      warn "$ERR"
+      return 1
+      ;;
+    1)
+      subscription_warning
+      [ "$AUTO" != 1 ] || warn "Several messengers are connected; each must be you."
+      if [ "$AUTO" != 1 ] && ! confirm "Every allowed account on every messenger is you?" N; then
+        CLAUDE_CODE_OAUTH_TOKEN=''
+        return 1
+      fi
+      ;;
+    *)
+      subscription_warning
+      if [ "$AUTO" != 1 ] && ! confirm "Only you will use this bot?" N; then
+        CLAUDE_CODE_OAUTH_TOKEN=''
+        return 1
+      fi
+      ;;
+  esac
+  if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+    printf '\n'
+    say "On any computer with Claude Code installed, run ${BOLD}claude setup-token$RESET, sign in"
+    say "in the browser, and copy the token it prints. It is valid for a year."
+  fi
+  while :; do
+    if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+      ask_secret "Token from claude setup-token"
+      CLAUDE_CODE_OAUTH_TOKEN=$REPLY
+    fi
+    ! token_shaped "$CLAUDE_CODE_OAUTH_TOKEN" || break
+    retry "That does not look like a token. Copy it exactly as claude setup-token printed it."
+    CLAUDE_CODE_OAUTH_TOKEN=''
+  done
+  CLAUDE_VIA='your Claude subscription' ANTHROPIC_API_KEY='' CLAUDE_CODE_USE_BEDROCK=''
+  ok "Claude runs on your subscription. The token expires in a year; run this installer again then."
+}
+
+setup_claude() {
+  # Whatever came from flags, the environment or an earlier .env gets verified;
+  # one given to this run takes precedence over the .env.
+  if [ -z "$CLAUDE_CHOICE" ]; then
+    if [ -n "$ANTHROPIC_API_KEY" ]; then CLAUDE_CHOICE=api
+    elif [ -n "$CLAUDE_CODE_USE_BEDROCK" ]; then CLAUDE_CHOICE=bedrock
+    elif [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then CLAUDE_CHOICE=plan
+    fi
+  fi
+  if [ "$CLAUDE_CHOICE" = api ]; then
+    setup_api_key
+    return
+  elif [ "$CLAUDE_CHOICE" = bedrock ]; then
+    setup_bedrock
+    return
+  elif [ "$CLAUDE_CHOICE" = plan ]; then
+    ! setup_subscription || return 0
+  elif other_credential; then
+    CLAUDE_VIA='the credential in .env'
+    ok "Using the Claude credential already in $DIR/.env."
+    return
+  fi
+  if [ "$CREDENTIAL" = 0 ] || [ "$AUTO" = 1 ]; then
+    info "Skipped. Until $DIR/.env has a credential, the bot answers with setup instructions."
+    return
+  fi
+  while :; do
+    say "How should Wirebot reach Claude?"
+    say "  ${BOLD}1$RESET  Claude API key    ${DIM}recommended; required when several people use the bot$RESET"
+    say "  ${BOLD}2$RESET  Amazon Bedrock    ${DIM}AWS credentials from this server$RESET"
+    say "  ${BOLD}3$RESET  My Claude plan    ${DIM}personal Pro/Max subscription; only you may use the bot$RESET"
+    say "  ${BOLD}4$RESET  Later             ${DIM}add a credential to .env yourself$RESET"
+    ask "Pick one" 1
+    printf '\n'
+    case $REPLY in
+      1) setup_api_key && return ;;
+      2) setup_bedrock && return ;;
+      3) ! setup_subscription || return 0 ;;
+      4)
+        info "Skipped. Until $DIR/.env has a credential, the bot answers with setup instructions."
+        return
+        ;;
+      *) warn "Type 1, 2, 3 or 4." ;;
+    esac
+    printf '\n'
+  done
 }
 
 # ── Messengers ───────────────────────────────────────────────────────────────
@@ -781,8 +942,8 @@ setup_channels() {
       printf '\n'
       confirm "Connect another messenger?" N || return 0
     fi
-    say "Where do you want to talk to Codex?"
-    say "  ${BOLD}1$RESET  Telegram  ${DIM}richest: files, voice, Mini App$RESET"
+    say "Where do you want to talk to the agent?"
+    say "  ${BOLD}1$RESET  Telegram  ${DIM}richest: files, Mini App$RESET"
     say "  ${BOLD}2$RESET  Slack     ${DIM}DMs and channel threads$RESET"
     say "  ${BOLD}3$RESET  Discord   ${DIM}text-only DMs and threads$RESET"
     ask "Pick one" 1
@@ -937,10 +1098,8 @@ launch() {
     docker compose logs --tail 30 wirebot 2>&1 | sed 's/^/    /' >&2
     die "Wirebot did not become healthy. Its last log lines are above."
   }
-  case $(json_str codex "$(health)") in
-    authenticated | not_required) ok "Codex is signed in." ;;
-    *) info "Codex is not signed in yet: send /login to the bot." ;;
-  esac
+  [ -n "$CLAUDE_VIA" ] ||
+    warn "No Claude credential yet: add one to $DIR/.env, then run: cd $DIR && docker compose up -d"
   [ -n "$PUBLIC_URL" ] || return 0
   if [ "$CADDY" = 1 ]; then
     # A re-run may have rewritten the Caddyfile under a Caddy that is already up.
@@ -969,8 +1128,9 @@ install_updater() {
 #!/bin/sh
 # Wirebot auto-updater, installed by install.sh and run by wirebot-updater.service.
 # Every hour it pulls the images named in docker-compose.yml. Once a newer one
-# has arrived, it asks Wirebot's /healthz every minute whether work is in
-# flight and recreates the containers after five idle answers in a row.
+# has arrived, it checks every minute whether the agent is working (a Claude
+# Code process exists only while a turn or scheduled run is in flight) and
+# recreates the containers after five idle checks in a row.
 set -u
 cd "$(dirname "$0")" || exit 1
 export COMPOSE_PROGRESS=quiet
@@ -986,8 +1146,7 @@ update_pending() {
 
 # An unreachable Wirebot counts as idle: an update may be what fixes it.
 busy() {
-  docker compose exec -T wirebot sh -c 'curl -fsS --max-time 10 "http://127.0.0.1:${PORT:-8787}/healthz"' 2>/dev/null |
-    grep -q '"busy" *: *true'
+  docker compose exec -T wirebot pgrep -x claude >/dev/null 2>&1
 }
 
 while :; do
@@ -1041,6 +1200,7 @@ summary() {
   [ -z "$SLACK_TEAM" ] || say "Slack      DM the app in $SLACK_TEAM and send /wirebot start"
   [ -z "$DISCORD_APP" ] || say "Discord    DM $DISCORD_APP and send /wirebot start"
   [ -z "$PUBLIC_URL" ] || say "Web app    $PUBLIC_URL/app"
+  say "Claude     ${CLAUDE_VIA:-not configured yet: add a credential to .env}"
   say "Files      $DIR (docker-compose.yml, .env)"
   say "Logs       cd $DIR && docker compose logs -f"
   [ ! -f /etc/systemd/system/wirebot-updater.service ] || say "Updates    automatic: journalctl -u wirebot-updater"
@@ -1073,6 +1233,14 @@ self_test() {
   ! token_shaped 'a"b' || die "self-test: token_shaped rejects quotes"
   ! token_shaped '' || die "self-test: token_shaped rejects empty"
   matches 'U0123ABC,W9ZZ' '^[UW][A-Z0-9]+(,[UW][A-Z0-9]+)*$' || die "self-test: slack ids"
+  TELEGRAM_ALLOWED_USER_IDS=111 SLACK_ALLOWED_USER_IDS='' DISCORD_ALLOWED_USER_IDS=''
+  check sharing-one "$(sharing)" 0
+  SLACK_ALLOWED_USER_IDS=U0123ABC
+  check sharing-maybe "$(sharing)" 1
+  SLACK_ALLOWED_USER_IDS='*'
+  check sharing-workspace "$(sharing)" 2
+  TELEGRAM_ALLOWED_USER_IDS=111,222 SLACK_ALLOWED_USER_IDS=''
+  check sharing-several "$(sharing)" 2
   RESET='' DIM='' GREEN='' G_FULL='#' G_EMPTY='-'
   check bar "$(bar 1 4 8)" '##------'
   echo "self-test passed"
@@ -1099,10 +1267,10 @@ main() {
   step "Wirebot image"
   prepare_dir
   pull_image
-  step "Sign in to Codex"
-  codex_login
   step "Connect a messenger"
   setup_channels
+  step "Connect Claude"
+  setup_claude
   step "Web address"
   setup_public_url
   step "Launch"

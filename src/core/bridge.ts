@@ -1,24 +1,19 @@
+import { type AgentAuth, missingAuthMessage } from "../agent/auth.js";
+import type { AgentService } from "../agent/service.js";
 import type { ScheduledRunsEngine } from "../automations/engine.js";
-import type { CodexRuntimeStatus } from "../codex/runtime-service.js";
-import type { CodexService } from "../codex/service.js";
-import type { Account } from "../generated/codex/v2/Account.js";
-import type { AccountLoginCompletedNotification } from "../generated/codex/v2/AccountLoginCompletedNotification.js";
-import type { GetAccountResponse } from "../generated/codex/v2/GetAccountResponse.js";
-import type { LoginAccountResponse } from "../generated/codex/v2/LoginAccountResponse.js";
 import type { BrowserAuth } from "../miniapp/browser-auth.js";
-import { BridgeError, errorMessage } from "../shared/errors.js";
+import { errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import {
   channelTraits,
   type InboundCommand,
   type InboundMessage,
   type MessageHandler,
-  type MessageResponder,
   type ProviderReference,
 } from "./channel.js";
 
 const introText =
-  "👋 Hi, I'm Wirebot. Send me a message and I'll hand it to Codex, then stream progress and results back into this chat.";
+  "👋 Hi, I'm Wirebot. Send me a message and I'll hand it to Claude, then stream progress and results back into this chat.";
 
 /**
  * The single source for the user-facing command list: /help and the Telegram
@@ -29,43 +24,31 @@ export const botCommands: readonly {
   readonly menuDescription: string;
   readonly help: string;
 }[] = [
-  { command: "start", menuDescription: "Set up Wirebot", help: "show setup and sign-in help" },
-  { command: "new", menuDescription: "Start a new Codex task", help: "start a fresh Codex task" },
+  { command: "start", menuDescription: "Set up Wirebot", help: "show setup help" },
+  { command: "new", menuDescription: "Start a new session", help: "start a fresh agent session" },
   {
     command: "back",
-    menuDescription: "Return to the previous Codex task",
-    help: "return to the previous Codex task",
+    menuDescription: "Return to the previous session",
+    help: "return to the previous agent session",
   },
   { command: "stop", menuDescription: "Stop the running turn", help: "stop the current turn" },
   {
     command: "compact",
-    menuDescription: "Compact Codex context",
+    menuDescription: "Compact the context",
     help: "summarize earlier context and free space",
   },
   { command: "schedules", menuDescription: "List scheduled runs", help: "list scheduled runs" },
   {
     command: "status",
-    menuDescription: "Show Codex status",
-    help: "check Codex and sign-in status",
+    menuDescription: "Show agent status",
+    help: "check the agent's credential and settings",
   },
-  { command: "login", menuDescription: "Sign in to Codex", help: "sign in to ChatGPT" },
-  { command: "logout", menuDescription: "Sign out of Codex", help: "sign out" },
   {
     command: "web",
     menuDescription: "Open Wirebot in a browser",
     help: "get a temporary browser sign-in link",
   },
-  { command: "config", menuDescription: "Open Codex settings", help: "open Codex settings" },
-  {
-    command: "reload",
-    menuDescription: "Reload Codex resources",
-    help: "reload Codex config, MCP servers, and skills",
-  },
-  {
-    command: "restart",
-    menuDescription: "Restart the Codex app-server",
-    help: "safely restart the Codex app-server",
-  },
+  { command: "config", menuDescription: "Open agent settings", help: "open agent settings" },
   { command: "help", menuDescription: "Show commands", help: "show this help" },
 ];
 
@@ -81,14 +64,7 @@ export const conversationScopedCommands: ReadonlySet<string> = new Set([
 ]);
 
 /** Commands that change shared instance state and require provider-admin gating. */
-export const instanceAdminCommands: ReadonlySet<string> = new Set([
-  "config",
-  "web",
-  "login",
-  "logout",
-  "reload",
-  "restart",
-]);
+export const instanceAdminCommands: ReadonlySet<string> = new Set(["config", "web"]);
 
 /** Denial for instance-admin commands; connectors reuse it where they intercept /config. */
 export const instanceAdminOnlyText =
@@ -96,7 +72,7 @@ export const instanceAdminOnlyText =
 
 function helpText(channel: string): string {
   return [
-    "Send me a message to work with Codex in this conversation.",
+    "Send me a message to work with Claude in this conversation.",
     "",
     ...botCommands.map((entry) => `${commandText(channel, entry.command)} — ${entry.help}`),
   ].join("\n");
@@ -106,43 +82,27 @@ function readyText(channel: string): string {
   return `Try something like "explain what this project does", or send ${commandText(channel, "help")} for all commands.`;
 }
 
-const loginCodeTtl = 15 * 60 * 1_000;
-
-type SignInDecision = "ready" | "deferred" | "rejected";
-
-export interface CodexRuntimeCommand {
-  status(): CodexRuntimeStatus;
-  reload(): Promise<unknown>;
-  restart(): Promise<unknown>;
+/** Live view of the agent's credential and model, for /start and /status. */
+export interface AgentStatusSource {
+  auth(): AgentAuth;
+  modelSummary(): string;
 }
 
-interface PendingLogin {
-  readonly responder: MessageResponder;
-  readonly timer: NodeJS.Timeout;
-  readonly channel: string;
-  /** Message that arrived before sign-in; replayed once login completes. */
-  readonly resume?: InboundMessage;
-}
-
-export class CodexBridge {
-  readonly #codex: CodexService;
+export class WirebotBridge {
+  readonly #agent: AgentService;
   readonly #browserAuth: BrowserAuth | undefined;
   readonly #publicUrl: string | undefined;
   readonly #logger: Logger;
-  readonly #runtimeCommand: CodexRuntimeCommand;
+  readonly #status: AgentStatusSource;
   readonly #scheduledRuns: ScheduledRunsEngine;
-  readonly #pendingLogins = new Map<string, PendingLogin>();
-  #signedInConfirmed = false;
 
   public readonly handleMessage: MessageHandler = async (message) => {
-    let deferred = false;
     try {
       // Command parsing is owned by the channel; the bridge trusts message.command.
       const command = message.command;
       if (command === undefined) {
-        const signIn = await this.ensureSignedIn(message);
-        if (signIn !== "ready") {
-          deferred = signIn === "deferred";
+        if (this.#status.auth().kind === "none") {
+          await message.responder.sendText(missingAuthMessage);
           return;
         }
         await this.runUserTurn(message);
@@ -154,34 +114,31 @@ export class CodexBridge {
         channel: message.address.channel,
         conversation: message.address.key,
       });
-      await message.responder.sendText(`Codex error: ${errorMessage(error)}`);
+      await message.responder.sendText(`Agent error: ${errorMessage(error)}`);
     } finally {
-      if (!deferred) await this.disposeMessage(message);
+      await this.disposeMessage(message);
     }
   };
 
   public constructor(
-    codex: CodexService,
+    agent: AgentService,
     publicUrl: string | undefined,
     logger: Logger,
-    runtimeCommand: CodexRuntimeCommand,
+    status: AgentStatusSource,
     scheduledRuns: ScheduledRunsEngine,
     browserAuth?: BrowserAuth,
   ) {
-    this.#codex = codex;
+    this.#agent = agent;
     this.#publicUrl = publicUrl;
     this.#browserAuth = browserAuth;
     this.#logger = logger;
-    this.#runtimeCommand = runtimeCommand;
+    this.#status = status;
     this.#scheduledRuns = scheduledRuns;
-    codex.onLoginCompleted((notification) => {
-      void this.handleLoginCompleted(notification);
-    });
   }
 
   private async runUserTurn(message: InboundMessage): Promise<void> {
     if (message.address.isGuest) {
-      await this.#codex.runTurn(
+      await this.#agent.runTurn(
         message.address.key,
         message.address.channel,
         message.text,
@@ -200,7 +157,7 @@ export class CodexBridge {
       owner,
       messageConversation(message),
     );
-    await this.#codex.runTurn(
+    await this.#agent.runTurn(
       message.address.key,
       message.address.channel,
       message.text,
@@ -233,34 +190,34 @@ export class CodexBridge {
         await message.responder.sendText(helpText(message.address.channel));
         return;
       case "new":
-        await this.#codex.resetConversation(message.address.key);
+        await this.#agent.resetConversation(message.address.key);
         await message.responder.sendText(
           channelTraits(message.address.channel).restartCarriesHistory && !message.address.isPrivate
-            ? "Started a fresh Codex task. Your next message will carry this conversation's earlier messages as context, without the previous task's memory. What should we work on?"
-            : "Started a fresh Codex task. What should we work on?",
+            ? "Started a fresh session. Your next message will carry this conversation's earlier messages as context, without the previous session's memory. What should we work on?"
+            : "Started a fresh session. What should we work on?",
         );
         return;
       case "back": {
-        const threadId = await this.#codex.activatePreviousConversationThread(
+        const threadId = await this.#agent.activatePreviousConversationThread(
           message.address.key,
           message.address.channel,
         );
         await message.responder.sendText(
           threadId === undefined
-            ? "There is no previous Codex task in this conversation."
-            : "Returned to the previous Codex task.",
+            ? "There is no previous session in this conversation."
+            : "Returned to the previous session.",
         );
         return;
       }
       case "stop": {
-        const stopped = await this.#codex.interrupt(message.address.key);
+        const stopped = await this.#agent.interrupt(message.address.key);
         await message.responder.sendText(
           stopped ? "Stopping the current turn." : "Nothing is running.",
         );
         return;
       }
       case "compact": {
-        const compacted = await this.#codex.compactConversation(
+        const compacted = await this.#agent.compactConversation(
           message.address.key,
           message.address.channel,
           message.responder,
@@ -272,42 +229,18 @@ export class CodexBridge {
           },
         );
         if (!compacted) {
-          await message.responder.sendText("There is no Codex task to compact.");
+          await message.responder.sendText("There is no session to compact yet.");
         }
         return;
       }
       case "status":
-        await message.responder.sendText(await this.statusText(message.address.channel));
+        await message.responder.sendText(this.statusText());
         return;
       case "schedules":
         await this.handleSchedules(message);
         return;
       case "continue":
         await this.handleContinueRun(message, command.args);
-        return;
-      case "login": {
-        if (!(await this.requirePrivateChat(message))) return;
-        const account = (await this.#codex.account().catch(() => undefined))?.account;
-        if (account !== undefined && account !== null) {
-          await message.responder.sendText(
-            `You're already ${accountSummary(account)}. Send ${commandText(message.address.channel, "logout")} first if you want to switch accounts.`,
-          );
-          return;
-        }
-        await this.sendLogin(
-          message.responder,
-          await this.#codex.startDeviceLogin(),
-          message.address.channel,
-        );
-        return;
-      }
-      case "logout":
-        if (!(await this.requirePrivateChat(message))) return;
-        await this.#codex.logout();
-        this.#signedInConfirmed = false;
-        await message.responder.sendText(
-          `Signed out of Codex. Send ${commandText(message.address.channel, "login")} whenever you want back in.`,
-        );
         return;
       case "web":
         await this.openBrowserApp(message);
@@ -324,21 +257,13 @@ export class CodexBridge {
           );
           return;
         }
-        await message.responder.sendText("Open the Mini App to edit Codex settings.", {
+        await message.responder.sendText("Open the Mini App to edit agent settings.", {
           button: {
             label: "Open settings",
             kind: "webApp",
             url: `${this.#publicUrl}/miniapp`,
           },
         });
-        return;
-      case "reload":
-        if (!(await this.requirePrivateChat(message))) return;
-        await this.handleRuntimeCommand(message, "reload");
-        return;
-      case "restart":
-        if (!(await this.requirePrivateChat(message))) return;
-        await this.handleRuntimeCommand(message, "restart");
         return;
       default:
         await message.responder.sendText(
@@ -382,7 +307,7 @@ export class CodexBridge {
     );
     if (automations.length === 0) {
       await message.responder.sendText(
-        "No scheduled runs yet. Ask Codex something like “check the build every weekday at 9”.",
+        "No scheduled runs yet. Ask something like “check the build every weekday at 9”.",
       );
       return;
     }
@@ -408,196 +333,18 @@ export class CodexBridge {
     );
     await message.responder.sendText(
       result.changed
-        ? `Continuing “${result.automationName}”. Subsequent messages will use that Codex thread. Send ${commandText(message.address.channel, "back")} to return.`
-        : `“${result.automationName}” is already the active Codex thread.`,
-    );
-  }
-
-  private async handleRuntimeCommand(
-    message: InboundMessage,
-    action: "reload" | "restart",
-  ): Promise<void> {
-    const runtime = this.#runtimeCommand;
-    await message.responder.sendText(
-      action === "reload"
-        ? "Applying Codex config, MCP servers, and skills…"
-        : "Safely restarting the Codex app-server…",
-    );
-    if (action === "reload") await runtime.reload();
-    else await runtime.restart();
-    const status = runtimeStatusSummary(runtime.status());
-    await message.responder.sendText(
-      action === "reload"
-        ? status.degraded
-          ? `Reload finished with warnings: ${status.detail}`
-          : "✅ Config and skills refreshed. MCP changes will be active on the next turn."
-        : status.degraded
-          ? `Restart needs attention: ${status.detail}`
-          : "✅ Codex restarted and is ready.",
+        ? `Continuing “${result.automationName}”. Subsequent messages will use that session. Send ${commandText(message.address.channel, "back")} to return.`
+        : `“${result.automationName}” is already the active session.`,
     );
   }
 
   private async handleStart(message: InboundMessage): Promise<void> {
-    const status = await this.#codex.account().catch(() => undefined);
-    if (status === undefined) {
-      await message.responder.sendText(`${introText}\n\n${helpText(message.address.channel)}`);
-      return;
-    }
-    if (!needsLogin(status)) {
-      const account = status.account;
-      const readyLine =
-        account === null
-          ? "✅ No sign-in needed with this configuration — you're ready to go."
-          : `✅ You're ${accountSummary(account)} — ready to go.`;
-      await message.responder.sendText(
-        `${introText}\n\n${readyLine}\n\n${readyText(message.address.channel)}`,
-      );
-      return;
-    }
-    if (!isPrivate(message)) {
-      await message.responder.sendText(
-        `${introText}\n\nTo get set up, open a private chat with me and send ${commandText(message.address.channel, "start")} — I'll walk you through signing in to ChatGPT.`,
-      );
-      return;
-    }
-    await this.sendLogin(
-      message.responder,
-      await this.#codex.startDeviceLogin(),
-      message.address.channel,
-      `${introText}\n\nOne thing first: let's connect your ChatGPT account.`,
-    );
-  }
-
-  private async ensureSignedIn(message: InboundMessage): Promise<SignInDecision> {
-    if (this.#signedInConfirmed) return "ready";
-    const status = await this.#codex.account().catch(() => undefined);
-    // If the status check itself fails, run the turn anyway so the real error surfaces.
-    if (status === undefined) return "ready";
-    if (!needsLogin(status)) {
-      this.#signedInConfirmed = true;
-      return "ready";
-    }
-    if (isPrivate(message)) {
-      await this.sendLogin(
-        message.responder,
-        await this.#codex.startDeviceLogin(),
-        message.address.channel,
-        "Almost there — I need you to sign in to ChatGPT before I can work on that. I'll start on your message as soon as you're in.",
-        message,
-      );
-      return "deferred";
-    } else {
-      await message.responder.sendText(
-        `Codex isn't signed in yet. Open a private chat with me and send ${commandText(message.address.channel, "start")} to set it up.`,
-      );
-      return "rejected";
-    }
-  }
-
-  private async handleLoginCompleted(
-    notification: AccountLoginCompletedNotification,
-  ): Promise<void> {
-    if (notification.success) this.#signedInConfirmed = true;
-    const pendingLogins = this.takePendingLogins(notification.loginId);
-    for (const pending of pendingLogins) {
-      try {
-        if (notification.success) {
-          const account = (await this.#codex.account().catch(() => undefined))?.account;
-          const summary =
-            account === undefined || account === null ? "signed in" : accountSummary(account);
-          const next =
-            pending.resume === undefined
-              ? "All set — send me a message and I'll get to work."
-              : "All set — starting on your message now.";
-          await pending.responder.sendText(`✅ You're ${summary}. ${next}`);
-          if (pending.resume !== undefined) {
-            await this.runUserTurn(pending.resume);
-          }
-        } else {
-          await pending.responder.sendText(
-            `Sign-in didn't go through${
-              notification.error === null ? "" : `: ${notification.error}`
-            }. Send ${commandText(pending.channel, "login")} to try again with a fresh code.`,
-          );
-        }
-      } catch (error) {
-        this.#logger.error("Could not deliver sign-in confirmation", error);
-      } finally {
-        if (pending.resume !== undefined) await this.disposeMessage(pending.resume);
-      }
-    }
-  }
-
-  private async sendLogin(
-    responder: MessageResponder,
-    login: LoginAccountResponse,
-    channel: string,
-    intro?: string,
-    resume?: InboundMessage,
-  ): Promise<void> {
-    const prefix = intro === undefined ? "" : `${intro}\n\n`;
-    switch (login.type) {
-      case "chatgptDeviceCode":
-        await responder.sendText(
-          `${prefix}Tap the button below and enter this one-time code on the sign-in page:\n\n${login.userCode}\n\nI'll confirm here the moment you're in.`,
-          {
-            button: { label: "Open sign-in", kind: "url", url: login.verificationUrl },
-          },
-        );
-        this.registerPendingLogin(login.loginId, responder, channel, resume);
-        return;
-      case "chatgpt":
-        await responder.sendText(
-          `${prefix}Open the sign-in page to continue. I'll confirm here the moment you're in.`,
-          {
-            button: { label: "Open sign-in", kind: "url", url: login.authUrl },
-          },
-        );
-        this.registerPendingLogin(login.loginId, responder, channel, resume);
-        return;
-      case "apiKey":
-        await responder.sendText("Codex is configured to use an API key.");
-        return;
-      case "chatgptAuthTokens":
-        await responder.sendText("Codex is configured with ChatGPT authentication tokens.");
-    }
-  }
-
-  private registerPendingLogin(
-    loginId: string,
-    responder: MessageResponder,
-    channel: string,
-    resume?: InboundMessage,
-  ): void {
-    const existing = this.#pendingLogins.get(loginId);
-    if (existing !== undefined) {
-      clearTimeout(existing.timer);
-      if (existing.resume !== undefined) void this.disposeMessage(existing.resume);
-    }
-    const timer = setTimeout(() => {
-      const expired = this.#pendingLogins.get(loginId);
-      if (expired?.timer !== timer) return;
-      this.#pendingLogins.delete(loginId);
-      if (expired.resume !== undefined) void this.disposeMessage(expired.resume);
-    }, loginCodeTtl);
-    timer.unref();
-    this.#pendingLogins.set(loginId, {
-      responder,
-      timer,
-      channel,
-      ...(resume === undefined ? {} : { resume }),
-    });
-  }
-
-  private takePendingLogins(loginId: string | null): readonly PendingLogin[] {
-    const taken: PendingLogin[] = [];
-    for (const [id, pending] of this.#pendingLogins) {
-      if (loginId !== null && id !== loginId) continue;
-      clearTimeout(pending.timer);
-      this.#pendingLogins.delete(id);
-      taken.push(pending);
-    }
-    return taken;
+    const auth = this.#status.auth();
+    const readyLine =
+      auth.kind === "none"
+        ? missingAuthMessage
+        : `✅ Connected to Claude through ${auth.description} — you're ready to go.\n\n${readyText(message.address.channel)}`;
+    await message.responder.sendText(`${introText}\n\n${readyLine}`);
   }
 
   private async disposeMessage(message: InboundMessage): Promise<void> {
@@ -616,55 +363,11 @@ export class CodexBridge {
     return false;
   }
 
-  private async statusText(channel: string): Promise<string> {
-    const runtime = runtimeStatusSummary(this.#runtimeCommand.status());
-    const response = await this.#codex.account().catch((error: unknown) => {
-      throw new BridgeError(
-        `Codex app-server is unavailable: ${errorMessage(error)}. Runtime status: ${runtime.detail}. Send ${commandText(channel, "restart")} to recover it.`,
-        "CODEX_STATUS_UNAVAILABLE",
-      );
-    });
-    const account = response.account;
-    const accountStatus =
-      account === null
-        ? response.requiresOpenaiAuth
-          ? `Codex app-server is connected. Not signed in — send ${commandText(channel, "login")} to connect ChatGPT.`
-          : "Codex app-server is connected. This configuration does not require OpenAI sign-in."
-        : `Codex app-server is connected. You're ${accountSummary(account)}.`;
-    return runtime.degraded
-      ? `${accountStatus}\nRuntime needs attention: ${runtime.detail}`
-      : accountStatus;
+  private statusText(): string {
+    const auth = this.#status.auth();
+    if (auth.kind === "none") return missingAuthMessage;
+    return `Claude is reached through ${auth.description}.\nModel: ${this.#status.modelSummary()}`;
   }
-}
-
-function runtimeStatusSummary(status: CodexRuntimeStatus): {
-  readonly degraded: boolean;
-  readonly detail: string;
-} {
-  const degraded = status.state === "degraded" || status.restartRequired;
-  const detail =
-    status.state === "restarting" && status.restartRequired
-      ? `the app-server is being relaunched automatically${status.lastError === null ? "" : ` after: ${status.lastError}`}`
-      : (status.lastError ??
-        (status.restartRequired
-          ? "an app-server restart is required to apply startup-only changes"
-          : status.state));
-  return { degraded, detail };
-}
-
-function accountSummary(account: Account): string {
-  switch (account.type) {
-    case "apiKey":
-      return "authenticated with an OpenAI API key";
-    case "chatgpt":
-      return `signed in to ChatGPT (${account.planType})`;
-    case "amazonBedrock":
-      return "authenticated through Amazon Bedrock";
-  }
-}
-
-function needsLogin(status: GetAccountResponse): boolean {
-  return status.account === null && status.requiresOpenaiAuth;
 }
 
 function isPrivate(message: InboundMessage): boolean {

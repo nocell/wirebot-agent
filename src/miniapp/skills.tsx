@@ -7,9 +7,8 @@ import { ChevronRight, File, FileText, Folder } from "lucide-react";
 import { type ReactElement, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AvailableSkill } from "../codex/runtime-service.js";
-import type { SkillDirectory, SkillDirectoryEntry, SkillFile } from "../codex/skill-browser.js";
-import { requestSkillResource } from "./api.js";
+import type { SkillDirectory, SkillDirectoryEntry, SkillFile } from "../agent/skill-browser.js";
+import { type AvailableSkill, requestSkillResource } from "./api.js";
 import { cn } from "./cn.js";
 import { useAppData } from "./data.js";
 import { Sheet } from "./dialogs.js";
@@ -52,7 +51,7 @@ export function SkillsTab(): ReactElement {
   if (skills === undefined) {
     const loading = (
       <LoadingState
-        header={data.skillsError === undefined ? "Loading Codex skills" : "Couldn’t load skills"}
+        header={data.skillsError === undefined ? "Loading skills" : "Couldn’t load skills"}
         description="Reading the skills currently available to this workspace…"
         error={data.skillsError}
         onRetry={data.reloadSkills}
@@ -85,7 +84,9 @@ export function SkillsTab(): ReactElement {
             </ListColHeader>
             <div className="listCol-body">
               {skills.length === 0 ? (
-                <Hint>No skills are available. Reload Codex after installing or enabling one.</Hint>
+                <Hint>
+                  No skills are installed yet. Add one under skills/ in the agent config directory.
+                </Hint>
               ) : filtered.length === 0 ? (
                 <Hint>No skills match “{query}”.</Hint>
               ) : (
@@ -113,7 +114,7 @@ export function SkillsTab(): ReactElement {
           <div className="paneBody">
             <Placeholder
               header="No skills available"
-              description="Reload Codex after installing or enabling a skill."
+              description="New skills apply from the next message."
             />
           </div>
         )}
@@ -132,10 +133,7 @@ export function SkillsTab(): ReactElement {
   }
   return (
     <Screen>
-      <PageTitle
-        title="Skills"
-        subtitle={`${skills.length} available to Codex in this workspace`}
-      />
+      <PageTitle title="Skills" subtitle={`${skills.length} available to the agent`} />
       <ScreenBody className="stack-sm">
         <SearchField
           placeholder="Search skills"
@@ -146,7 +144,7 @@ export function SkillsTab(): ReactElement {
         {skills.length === 0 ? (
           <Placeholder
             header="No skills available"
-            description="Reload Codex after installing or enabling a skill."
+            description="New skills apply from the next message."
           />
         ) : filtered.length === 0 ? (
           <Hint>No skills match “{query}”.</Hint>
@@ -163,7 +161,7 @@ export function SkillsTab(): ReactElement {
             ))}
           </Group>
         )}
-        <Hint>Reload Codex after installing or enabling a skill.</Hint>
+        <Hint>New skills apply from the next message.</Hint>
       </ScreenBody>
       <TabBar route={route} />
     </Screen>
@@ -173,10 +171,7 @@ export function SkillsTab(): ReactElement {
 function SkillMissing({ name }: { readonly name: string }): ReactElement {
   return (
     <div className="paneBody">
-      <Placeholder
-        header="Skill not found"
-        description={`“${name}” is not available to Codex right now. Reload Codex after installing or enabling it.`}
-      />
+      <Placeholder header="Skill not found" description={`“${name}” is not installed right now.`} />
     </div>
   );
 }
@@ -285,7 +280,7 @@ function SkillDetailMobile({ skill }: { readonly skill: AvailableSkill }): React
           <>
             <Instructions document={document} />
             <Hint className="skillFootnote">
-              These are the instructions Codex reads when the skill is selected.
+              These are the instructions Claude reads when it uses the skill.
             </Hint>
           </>
         ) : (

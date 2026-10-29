@@ -1,62 +1,32 @@
-import { ConfigValidationError, type EditableConfigSnapshot } from "../codex/config-service.js";
-import { modelSelectionPatch, resolveSelectedModel } from "../codex/model-settings.js";
-import type { WirebotSettingsStore } from "../core/settings-store.js";
+import {
+  type AgentConfigAccess,
+  type AgentConfigSnapshot,
+  permissionModeLabels,
+} from "../agent/config.js";
+import { effortLevels, permissionModes } from "../core/settings-store.js";
 import { errorMessage } from "../shared/errors.js";
 
-/** Narrow port over CodexConfigService, easy to fake in tests. */
-export interface CodexConfigAccess {
-  read(): Promise<ChannelConfigSnapshot>;
-  update(input: unknown): Promise<unknown>;
-  updateAutoMode?(enabled: boolean): Promise<unknown>;
-}
+export type { AgentConfigAccess } from "../agent/config.js";
 
-export type ChannelConfigSnapshot = EditableConfigSnapshot & { readonly autoMode?: boolean };
+export type ChannelConfigSnapshot = AgentConfigSnapshot;
 
-export function withWirebotSettings(
-  config: CodexConfigAccess,
-  settings: WirebotSettingsStore,
-  afterConfigWrite?: () => Promise<unknown>,
-): CodexConfigAccess {
-  return {
-    read: async () => ({ ...(await config.read()), autoMode: settings.read().autoMode }),
-    update: async (input) => {
-      const result = await config.update(input);
-      await afterConfigWrite?.();
-      return result;
-    },
-    updateAutoMode: (autoMode) => settings.update({ autoMode }),
-  };
-}
-
-export const configFieldKeys = [
-  "model",
-  "auto_mode",
-  "model_reasoning_effort",
-  "service_tier",
-  "approval_policy",
-  "sandbox_mode",
-  "web_search",
-] as const;
+export const configFieldKeys = ["model", "auto_mode", "effort", "permission_mode"] as const;
 
 export type ConfigFieldKey = (typeof configFieldKeys)[number];
 
 export const fieldLabels: Readonly<Record<ConfigFieldKey, string>> = {
   model: "Model",
-  auto_mode: "Auto effort & speed",
-  model_reasoning_effort: "Reasoning effort",
-  service_tier: "Speed",
-  approval_policy: "Approvals",
-  sandbox_mode: "Sandbox",
-  web_search: "Web search",
+  auto_mode: "Auto effort",
+  effort: "Effort",
+  permission_mode: "Permissions",
 };
 
 export const fieldNotes: Partial<Record<ConfigFieldKey, string>> = {
   auto_mode:
-    "Reassess every message using the full conversation; in DMs, new starts fresh. Simple questions: Low/Medium. Tasks: High/Extra high. Deep research and debugging: Ultra at Standard speed. Explicit speed requests: Ultrafast/Fast when available. Your selected model stays the same.",
-  model_reasoning_effort: "Choosing a manual effort turns Auto mode off.",
-  service_tier: "Choosing a manual speed turns Auto mode off.",
-  sandbox_mode:
-    "In the Docker container only danger-full-access executes commands reliably; the container itself is the isolation boundary.",
+    "Pick an effort for every message from its wording: simple questions Low/Medium, tasks High/Extra high, deep research and debugging Max. Your selected model stays the same.",
+  effort: "Choosing a manual effort turns Auto effort off.",
+  permission_mode:
+    "In the Docker container the container itself is the isolation boundary, so full access is the default. Approval prompts arrive in the chat that started the turn; scheduled runs never prompt.",
 };
 
 export const defaultOptionValue = "__default__";
@@ -71,26 +41,28 @@ export function fieldKey(candidate: string | undefined): ConfigFieldKey | undefi
 }
 
 export function displayValue(snapshot: ChannelConfigSnapshot, field: ConfigFieldKey): string {
-  if (field === "auto_mode") return snapshot.autoMode ? "On" : "Off";
-  if (snapshot.autoMode && (field === "model_reasoning_effort" || field === "service_tier"))
-    return "Auto";
-  const raw = snapshot.values[field];
-  if (field === "service_tier") {
-    if (raw === null || raw === "default") return "Standard";
-    const tier = raw === "fast" ? "priority" : raw;
-    const model = resolveSelectedModel(snapshot.values.model, snapshot.capabilities.models);
-    return model?.serviceTiers.find((option) => option.id === tier)?.name ?? String(raw);
+  const { settings } = snapshot;
+  switch (field) {
+    case "auto_mode":
+      return settings.autoMode ? "On" : "Off";
+    case "model":
+      return (
+        snapshot.models.find((model) => model.value === (settings.model ?? "default"))
+          ?.displayName ??
+        settings.model ??
+        "Default"
+      );
+    case "effort":
+      return settings.autoMode ? "Auto" : (settings.effort ?? "default");
+    case "permission_mode":
+      return permissionModeLabels[settings.permissionMode ?? snapshot.defaultPermissionMode];
   }
-  if (raw === null || raw === undefined) return "default";
-  // approval_policy can be a granular object; summarize it.
-  return typeof raw === "string" ? raw : "granular";
 }
 
 export function fieldOptions(
   snapshot: ChannelConfigSnapshot,
   field: ConfigFieldKey,
 ): FieldOption[] {
-  const model = resolveSelectedModel(snapshot.values.model, snapshot.capabilities.models);
   switch (field) {
     case "auto_mode":
       return [
@@ -98,44 +70,26 @@ export function fieldOptions(
         { value: "false", label: "Off" },
       ];
     case "model":
-      return snapshot.capabilities.models.map((candidate) => ({
-        value: candidate.model,
-        label: `${candidate.displayName}${candidate.isDefault ? " (default)" : ""}`,
+      return snapshot.models.map((candidate) => ({
+        value: candidate.value === "default" ? null : candidate.value,
+        label: candidate.displayName,
       }));
-    case "model_reasoning_effort":
+    case "effort": {
+      const model = snapshot.models.find(
+        (candidate) => candidate.value === (snapshot.settings.model ?? "default"),
+      );
       return [
-        ...(model?.supportedReasoningEfforts ?? []).map((option) => ({
-          value: option.reasoningEffort,
-          label: option.reasoningEffort,
-        })),
-        { value: null, label: `default (${model?.defaultReasoningEffort ?? "model default"})` },
+        ...(model?.efforts ?? effortLevels).map((effort) => ({ value: effort, label: effort })),
+        { value: null, label: "default (model default)" },
       ];
-    case "service_tier":
+    }
+    case "permission_mode":
       return [
-        ...(model?.serviceTiers ?? []).map((tier) => ({ value: tier.id, label: tier.name })),
-        { value: null, label: "standard (default)" },
-      ];
-    case "approval_policy":
-      return [
-        { value: "untrusted", label: "untrusted — approve most actions" },
-        { value: "on-request", label: "on-request — Codex decides when to ask" },
-        { value: "never", label: "never — fully unattended" },
-        { value: null, label: "default" },
-      ];
-    case "sandbox_mode":
-      return [
-        { value: "read-only", label: "read-only" },
-        { value: "workspace-write", label: "workspace-write" },
-        { value: "danger-full-access", label: "danger-full-access" },
-        { value: null, label: "default" },
-      ];
-    case "web_search":
-      return [
-        { value: "disabled", label: "disabled" },
-        { value: "cached", label: "cached" },
-        { value: "indexed", label: "indexed" },
-        { value: "live", label: "live" },
-        { value: null, label: "default" },
+        ...permissionModes.map((mode) => ({ value: mode, label: permissionModeLabels[mode] })),
+        {
+          value: null,
+          label: `default (${permissionModeLabels[snapshot.defaultPermissionMode]})`,
+        },
       ];
   }
 }
@@ -160,18 +114,15 @@ export function overviewModel(
   status?: string,
 ): ConfigOverviewModel {
   return {
-    title: "Codex settings",
+    title: "Agent settings",
     ...(status === undefined ? {} : { status }),
-    fields: configFieldKeys
-      .filter((key) => key !== "auto_mode" || snapshot.autoMode !== undefined)
-      .map((key) => ({
-        key,
-        label: fieldLabels[key],
-        value: displayValue(snapshot, key),
-      })),
-    warnings: snapshot.validation.issues
-      .map((issue) => `⚠️ ${issue.path}: ${issue.message}`)
-      .slice(0, 3),
+    fields: configFieldKeys.map((key) => ({
+      key,
+      label: fieldLabels[key],
+      value: displayValue(snapshot, key),
+    })),
+    warnings:
+      snapshot.auth.kind === "none" ? ["⚠️ The agent has no Claude credential configured."] : [],
     footer: "Everyone using this Wirebot shares these settings.",
   };
 }
@@ -197,12 +148,17 @@ export function pickerModel(
   field: ConfigFieldKey,
 ): ConfigPickerModel {
   const note = fieldNotes[field];
+  const { settings } = snapshot;
   const current =
     field === "auto_mode"
-      ? String(snapshot.autoMode ?? false)
-      : snapshot.autoMode && (field === "model_reasoning_effort" || field === "service_tier")
-        ? undefined
-        : snapshot.values[field];
+      ? String(settings.autoMode)
+      : field === "model"
+        ? settings.model
+        : field === "effort"
+          ? settings.autoMode
+            ? undefined
+            : settings.effort
+          : settings.permissionMode;
   return {
     field,
     label: fieldLabels[field],
@@ -215,36 +171,34 @@ export function pickerModel(
   };
 }
 
-/** Apply a picker selection through CodexConfigService and describe the outcome. */
+/** Apply a picker selection through the agent settings and describe the outcome. */
 export async function applyConfigValue(
-  config: CodexConfigAccess,
+  config: AgentConfigAccess,
   field: ConfigFieldKey,
   encoded: string,
 ): Promise<string> {
   const value = encoded === defaultOptionValue ? null : decodeURIComponent(encoded);
   try {
-    if (field === "auto_mode") {
-      if (config.updateAutoMode === undefined || (value !== "true" && value !== "false"))
-        throw new Error("Auto mode setting unavailable");
-      await config.updateAutoMode(value === "true");
-      return `✅ Auto effort & speed ${value === "true" ? "enabled" : "disabled"}.`;
+    switch (field) {
+      case "auto_mode":
+        if (value !== "true" && value !== "false") throw new Error("Invalid Auto effort value");
+        await config.update({ autoMode: value === "true" });
+        return `✅ Auto effort ${value === "true" ? "enabled" : "disabled"}.`;
+      case "model":
+        await config.update({ model: value });
+        return "✅ Model updated.";
+      case "effort": {
+        const before = await config.read();
+        await config.update({ effort: value, autoMode: false });
+        return before.settings.autoMode
+          ? "✅ Effort updated. Auto effort disabled."
+          : "✅ Effort updated.";
+      }
+      case "permission_mode":
+        await config.update({ permissionMode: value });
+        return "✅ Permissions updated.";
     }
-    const snapshot = await config.read();
-    await config.update({
-      expectedVersion: snapshot.version,
-      values:
-        field === "model"
-          ? modelSelectionPatch(snapshot.values, value, snapshot.capabilities.models)
-          : { [field]: value },
-    });
-    if (snapshot.autoMode && (field === "model_reasoning_effort" || field === "service_tier")) {
-      await config.updateAutoMode?.(false);
-      return `✅ ${fieldLabels[field]} updated. Auto mode disabled.`;
-    }
-    return `✅ ${fieldLabels[field]} updated.`;
   } catch (error) {
-    return error instanceof ConfigValidationError
-      ? `⚠️ ${error.issues.map((issue) => issue.message).join(" ") || "The change was rejected."}`
-      : `⚠️ ${errorMessage(error)}`;
+    return `⚠️ ${errorMessage(error)}`;
   }
 }

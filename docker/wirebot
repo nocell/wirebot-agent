@@ -1,0 +1,3 @@
+#!/bin/sh
+# Runs Wirebot from its source tree with the bundled Bun runtime.
+exec /opt/wirebot/bin/bun /opt/wirebot/app/src/cli/main.ts "$@"

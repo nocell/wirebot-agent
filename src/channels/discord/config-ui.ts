@@ -5,12 +5,12 @@ import {
   type MessageActionRowComponentBuilder,
   StringSelectMenuBuilder,
 } from "discord.js";
-import type { EditableConfigSnapshot } from "../../codex/config-service.js";
+import type { AgentConfigSnapshot } from "../../agent/config.js";
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import {
+  type AgentConfigAccess,
   applyConfigValue,
-  type CodexConfigAccess,
   type ConfigFieldKey,
   fieldKey,
   overviewModel,
@@ -18,7 +18,7 @@ import {
 } from "../config-fields.js";
 import type { DiscordActionRow, DiscordMessagingApi } from "./reply.js";
 
-export type { CodexConfigAccess } from "../config-fields.js";
+export type { AgentConfigAccess } from "../config-fields.js";
 
 export const discordConfigActionPrefix = "wirebot_cfg";
 
@@ -30,10 +30,10 @@ interface DiscordConfigScreen {
 /** Compact select-menu settings UI for Discord direct messages. */
 export class DiscordConfigUi {
   readonly #api: DiscordMessagingApi;
-  readonly #config: CodexConfigAccess;
+  readonly #config: AgentConfigAccess;
   readonly #logger: Logger;
 
-  public constructor(api: DiscordMessagingApi, config: CodexConfigAccess, logger: Logger) {
+  public constructor(api: DiscordMessagingApi, config: AgentConfigAccess, logger: Logger) {
     this.#api = api;
     this.#config = config;
     this.#logger = logger;
@@ -87,7 +87,7 @@ export class DiscordConfigUi {
   }
 }
 
-function overviewScreen(snapshot: EditableConfigSnapshot, status?: string): DiscordConfigScreen {
+function overviewScreen(snapshot: AgentConfigSnapshot, status?: string): DiscordConfigScreen {
   const model = overviewModel(snapshot, status);
   const content = [
     `**${model.title}**`,
@@ -111,10 +111,7 @@ function overviewScreen(snapshot: EditableConfigSnapshot, status?: string): Disc
   return { content, components: [row(menu)] };
 }
 
-function pickerScreen(
-  snapshot: EditableConfigSnapshot,
-  field: ConfigFieldKey,
-): DiscordConfigScreen {
+function pickerScreen(snapshot: AgentConfigSnapshot, field: ConfigFieldKey): DiscordConfigScreen {
   const model = pickerModel(snapshot, field);
   const options = model.options
     .map((option) => ({

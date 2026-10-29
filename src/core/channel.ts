@@ -152,7 +152,7 @@ export type MessageHandler = (message: InboundMessage) => Promise<void>;
 
 /**
  * Presentation traits a connector declares about itself, for shared code that
- * only holds a channel name (bridge texts, Codex prompt context).
+ * only holds a channel name (bridge texts, agent prompt context).
  */
 export interface ChannelTraits {
   /** Render a bot command the way users invoke it on this connector. */

@@ -1,9 +1,9 @@
 import { errorMessage } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import {
+  type AgentConfigAccess,
   applyConfigValue,
   type ChannelConfigSnapshot,
-  type CodexConfigAccess,
   type ConfigFieldKey,
   fieldKey,
   overviewModel,
@@ -12,22 +12,22 @@ import {
 import { escapeSlackEntities } from "./format.js";
 import type { SlackBlock, SlackButtonElement, SlackMessagingApi } from "./reply.js";
 
-export type { CodexConfigAccess } from "../config-fields.js";
+export type { AgentConfigAccess } from "../config-fields.js";
 
 export const slackConfigActionPrefix = "wirebot_cfg";
 
 /**
- * Interactive Codex settings rendered as Slack blocks — the Slack counterpart
+ * Interactive agent settings rendered as Slack blocks — the Slack counterpart
  * of the Telegram Mini App's settings screen. One message is edited in place:
  * an overview screen with a button per setting, and per-setting picker
- * screens whose buttons update Codex or Wirebot's Auto mode setting.
+ * screens whose buttons update the shared agent settings.
  */
 export class SlackConfigUi {
   readonly #api: SlackMessagingApi;
-  readonly #config: CodexConfigAccess;
+  readonly #config: AgentConfigAccess;
   readonly #logger: Logger;
 
-  public constructor(api: SlackMessagingApi, config: CodexConfigAccess, logger: Logger) {
+  public constructor(api: SlackMessagingApi, config: AgentConfigAccess, logger: Logger) {
     this.#api = api;
     this.#config = config;
     this.#logger = logger;
@@ -100,7 +100,7 @@ function overviewScreen(
     }),
   );
   return {
-    text: "Codex settings",
+    text: "Agent settings",
     blocks: [
       { type: "section", text: { type: "mrkdwn", text: header.slice(0, 3_000) } },
       ...chunkButtons(buttons),
@@ -132,7 +132,7 @@ function pickerScreen(
     value: "menu",
   };
   return {
-    text: `Codex settings — ${model.label}`,
+    text: `Agent settings — ${model.label}`,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text: header.slice(0, 3_000) } },
       ...chunkButtons([...buttons, back]),

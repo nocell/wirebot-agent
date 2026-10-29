@@ -46,20 +46,22 @@ DISCORD_BOT_TOKEN=replace-me
 DISCORD_ALLOWED_USER_IDS=123456789012345678,234567890123456789
 ```
 
-Every listed user may start Codex turns and answer prompts. Messages and interactions from anyone
-else are ignored. To restrict instance-wide commands such as login, logout, reload, restart, and
-settings while still letting a broader set use Codex, add:
+Every listed user may start agent turns and answer prompts. Messages and interactions from anyone
+else are ignored. To restrict instance-wide commands (settings and browser sign-in) while still
+letting a broader set use the agent, add:
 
 ```dotenv
 DISCORD_ADMIN_USER_IDS=123456789012345678
 ```
 
 When `DISCORD_ADMIN_USER_IDS` is unset, every allowed user is an admin. All Discord connector
-variables are stripped from the environments of Codex, npm, cloudflared, and other child
+variables are stripped from the environments of the agent, npm, cloudflared, and other child
 processes.
 
-All allowed Discord users operate the same Wirebot installation: they share its Codex account,
-workspace, and instance settings. An allowed user ID is authorized anywhere the bot is installed,
+All allowed Discord users operate the same Wirebot installation: they share its Claude credential,
+workspace, and instance settings. When more than one person is allowed, that credential must be an
+API key or a cloud provider: Anthropic's terms allow a personal Claude subscription only for your
+own use. An allowed user ID is authorized anywhere the bot is installed,
 not only in one server, so keep both the allowlist and the bot's server membership intentionally
 small.
 
@@ -71,7 +73,7 @@ Start Wirebot normally:
 docker compose up -d
 ```
 
-In a direct message, send text to Codex immediately. In a server text channel, mention the bot in
+In a direct message, send text to the agent immediately. In a server text channel, mention the bot in
 the first message; Wirebot creates a thread named from the request and streams the work there.
 Messages in a thread created by Wirebot continue naturally without another mention. In an
 existing human-owned thread, mention or reply to the bot when you want it to act. On its first
@@ -87,12 +89,8 @@ Wirebot owns one global application command with subcommands:
 /wirebot compact
 /wirebot schedules
 /wirebot status
-/wirebot login
-/wirebot logout
 /wirebot config
 /wirebot web
-/wirebot reload
-/wirebot restart
 /wirebot help
 ```
 
@@ -101,23 +99,25 @@ a stable task boundary. You can also write `!new` or `/new` as a normal direct m
 the bot with that text in a server. In a direct message, `/wirebot config` or `/wirebot web`
 gives bot admins a private browser sign-in link. It expires after 5 minutes and works once;
 the browser session lasts 12 hours. Set `PUBLIC_URL` to an HTTPS origin or use the automatic
-quick tunnel. Without either, `/wirebot config` keeps the compact in-chat settings picker.
+quick tunnel. Without either, `/wirebot config` keeps the compact in-chat settings picker
+(Model, Auto effort, Effort, Permissions).
 Browser access follows `DISCORD_ADMIN_USER_IDS`, independently of Discord server roles.
 Schedules remain owned by the signed-in Discord user and new ones deliver to that private chat.
 
-Approvals and user-input prompts arrive as buttons. Only the user who received a prompt can answer
-it, and controls expire after five minutes or disappear when the requesting turn ends. Scheduled
-runs publish back into the originating DM or thread; **Continue this run** switches to the run's
-Codex task without changing its delivery destination.
+Approval prompts (only outside full-access mode) and the agent's clarifying questions arrive as
+buttons. Only the user who received a prompt can answer it, and controls expire after five minutes
+or disappear when the requesting turn ends. Scheduled runs never prompt; they publish back into the
+originating DM or thread, and **Continue this run** switches to the run's agent session without
+changing its delivery destination.
 
 ## Text-only and safety behavior
 
 - Incoming attachments, stickers, and polls are never downloaded. With accompanying text, Wirebot
-  tells Codex what Discord omitted; media-only messages get a short prompt to paste or describe the
+  tells the agent what Discord omitted; media-only messages get a short prompt to paste or describe the
   relevant content. Forwarded text is preserved with a visible context marker; forwarded media
   follows the same omission policy.
-- Generated images and linked workspace files are never uploaded to Discord. Wirebot names each
-  omitted output file in text, and connector context tells Codex not to promise downloads.
+- Linked workspace files are never uploaded to Discord. Wirebot names each omitted output file in
+  text, and connector context tells the agent not to promise downloads.
 - Replies are split at Discord's 2,000-character content limit. Markdown remains native Discord
   Markdown.
 - Every message create and edit uses an empty allowed-mentions policy, disables reply pings, and

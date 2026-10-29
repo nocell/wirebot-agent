@@ -1,0 +1,5 @@
+{
+  "name": "wirebot",
+  "description": "Skills bundled with Wirebot: container runtime boundaries and read-only Slack history.",
+  "version": "0.1.0"
+}

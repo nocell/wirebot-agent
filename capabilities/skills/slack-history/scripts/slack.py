@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only Slack history helper for Codex inside Wirebot.
+"""Read-only Slack history helper for the agent inside Wirebot.
 
-Only Slack read methods are called. The token comes from WIREBOT_CODEX_SLACK_TOKEN
-and is never printed.
+Only Slack read methods are called. The token comes from the file named by
+WIREBOT_SLACK_TOKEN_FILE and is never printed.
 """
 
 from __future__ import annotations
@@ -34,11 +34,18 @@ class SlackError(Exception):
 
 
 def token() -> str:
-    value = os.environ.get("WIREBOT_CODEX_SLACK_TOKEN", "").strip()
-    if not value:
+    path = os.environ.get("WIREBOT_SLACK_TOKEN_FILE", "").strip()
+    if not path:
         raise SlackError(
-            "WIREBOT_CODEX_SLACK_TOKEN is not set; this Wirebot instance has no Slack read access"
+            "WIREBOT_SLACK_TOKEN_FILE is not set; this Wirebot instance has no Slack read access"
         )
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError as error:
+        raise SlackError(f"cannot read the Slack token file: {error.strerror}") from None
+    if not value:
+        raise SlackError("the Slack token file is empty")
     return value
 
 

@@ -20,10 +20,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun test
-      - run: bun run compile
-      - name: Compiled binary smoke test
-        run: |
-          test "$(./dist/wirebot version)" = "$(bun -p 'require("./package.json").version')"
+      - run: bun run build
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -36,4 +33,7 @@ jobs:
           load: true
           tags: wirebot:ci
       - name: Image smoke test
-        run: docker run --rm wirebot:ci version
+        run: |
+          test "$(docker run --rm wirebot:ci version)" = "$(jq -r .version package.json)"
+          docker run --rm --entrypoint sh wirebot:ci -c \
+            'ls /opt/wirebot/app/node_modules/@anthropic-ai/ | grep -q "claude-agent-sdk-linux-"' 

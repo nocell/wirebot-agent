@@ -303,7 +303,7 @@ export class TelegramGuestResponder implements MessageResponder {
     const result = {
       type: "article" as const,
       id,
-      title: "Codex",
+      title: "Claude",
       input_message_content: { rich_message: { markdown: richText } },
     };
     try {
@@ -317,7 +317,7 @@ export class TelegramGuestResponder implements MessageResponder {
       const sent = await this.#api.answerGuestQuery(this.#guestQueryId, {
         type: "article",
         id,
-        title: "Codex",
+        title: "Claude",
         input_message_content: { message_text: plainText },
       });
       return {
@@ -372,7 +372,7 @@ class TelegramGuestReplyStream implements OutboundStream {
   }
 
   public async fail(message: string): Promise<void> {
-    await this.complete(`Codex error: ${message}`);
+    await this.complete(`Agent error: ${message}`);
   }
 
   private async finish(text: string, attachments: readonly OutboundAttachment[]): Promise<void> {
@@ -500,7 +500,7 @@ class TelegramReplyStream implements OutboundStream {
   }
 
   public async fail(message: string): Promise<void> {
-    await this.complete(`Codex error: ${message}`);
+    await this.complete(`Agent error: ${message}`);
   }
 
   private scheduleDraft(immediate = false): void {

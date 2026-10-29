@@ -35,7 +35,7 @@ import type { Logger } from "../../shared/logger.js";
 import { PendingChoices } from "../choices.js";
 import { decodeCommandAction } from "../command-actions.js";
 import { reactToDiscordMessage } from "../reactions.js";
-import { type CodexConfigAccess, DiscordConfigUi, discordConfigActionPrefix } from "./config-ui.js";
+import { type AgentConfigAccess, DiscordConfigUi, discordConfigActionPrefix } from "./config-ui.js";
 import {
   discordDisplayName,
   discordTextContent,
@@ -96,7 +96,7 @@ export class DiscordChannel implements MessagingChannel {
   #handler: MessageHandler | undefined;
   #botUserId: string | undefined;
 
-  public constructor(config: DiscordConfig, logger: Logger, configAccess?: CodexConfigAccess) {
+  public constructor(config: DiscordConfig, logger: Logger, configAccess?: AgentConfigAccess) {
     this.#botToken = config.botToken;
     this.#allowedUserIds = config.allowedUserIds;
     this.#adminUserIds = config.adminUserIds;
@@ -338,7 +338,7 @@ export class DiscordChannel implements MessagingChannel {
 
   private async notifyThreadRequired(message: Message): Promise<void> {
     const content =
-      "I need a usable Discord thread to keep Codex tasks isolated. Grant Create Public Threads and Send Messages in Threads, or mention me inside an unlocked thread where I can reply.";
+      "I need a usable Discord thread to keep agent sessions isolated. Grant Create Public Threads and Send Messages in Threads, or mention me inside an unlocked thread where I can reply.";
     const privateThread =
       message.channel.isThread() && message.channel.type === ChannelType.PrivateThread;
     const parent = message.channel.isThread() && !privateThread ? message.channel.parent : null;
@@ -420,7 +420,7 @@ export class DiscordChannel implements MessagingChannel {
         return;
       }
       if (!inbound.address.isPrivate) {
-        await inbound.responder.sendText("Open Codex settings in a direct message with the bot.");
+        await inbound.responder.sendText("Open agent settings in a direct message with the bot.");
         return;
       }
       await this.#configUi.open(channelId);
@@ -481,7 +481,7 @@ export class DiscordChannel implements MessagingChannel {
     if (!isPrivate && !isThread && conversationScopedCommands.has(name)) {
       await interaction.reply({
         content:
-          "In servers each Discord thread is its own Codex conversation. Run this command in a Wirebot thread or a direct message.",
+          "In servers each Discord thread is its own agent conversation. Run this command in a Wirebot thread or a direct message.",
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -494,14 +494,14 @@ export class DiscordChannel implements MessagingChannel {
       }
       if (!isPrivate) {
         await interaction.reply({
-          content: "Open Codex settings in a direct message with the bot.",
+          content: "Open agent settings in a direct message with the bot.",
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       await this.#configUi.open(channelId);
-      await interaction.editReply("Opened Codex settings below.");
+      await interaction.editReply("Opened agent settings below.");
       return;
     }
 
@@ -666,7 +666,7 @@ export class DiscordChannel implements MessagingChannel {
     if (!allowed) {
       await interaction
         .followUp({
-          content: "Codex settings are available to Wirebot admins in direct messages.",
+          content: "Agent settings are available to Wirebot admins in direct messages.",
           flags: MessageFlags.Ephemeral,
         })
         .catch(() => undefined);

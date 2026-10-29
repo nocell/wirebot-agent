@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
-import { withWirebotSettings } from "../src/channels/config-fields.js";
+import { AgentConfigService } from "../src/agent/config.js";
 import { SlackChannel } from "../src/channels/slack/channel.js";
 import { SlackConfigUi } from "../src/channels/slack/config-ui.js";
 import type { SlackMessageEvent } from "../src/channels/slack/message.js";
@@ -13,13 +13,10 @@ import type {
   SlackMessagingApi,
   SlackPostOptions,
 } from "../src/channels/slack/reply.js";
-import type { EditableCodexConfig } from "../src/codex/config-service.js";
 import type { InboundMessage } from "../src/core/channel.js";
 import { WirebotSettingsStore } from "../src/core/settings-store.js";
 import { deferred } from "../src/shared/async.js";
 import { Logger } from "../src/shared/logger.js";
-import { modelCatalog } from "./fixtures/model-catalog.js";
-import { snapshot } from "./fixtures/web-app.js";
 
 const directories: string[] = [];
 const logger = new Logger("error");
@@ -191,35 +188,45 @@ function text(blocks: readonly SlackBlock[] | undefined) {
   );
 }
 
+const models = [
+  { value: "default", displayName: "Default", description: "Recommended" },
+  {
+    value: "opus",
+    displayName: "Opus",
+    description: "Most capable",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] as const,
+  },
+  {
+    value: "haiku",
+    displayName: "Haiku",
+    description: "Fastest",
+    supportsEffort: true,
+    supportedEffortLevels: ["low", "medium", "high"] as const,
+  },
+].map((model) => ({
+  ...model,
+  ...("supportedEffortLevels" in model
+    ? { supportedEffortLevels: [...model.supportedEffortLevels] }
+    : {}),
+}));
+
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "wirebot-slack-config-"));
   directories.push(directory);
   const settings = new WirebotSettingsStore(join(directory, "settings.json"), logger);
-  const state = {
-    values: {
-      ...snapshot.values,
-      model: "gpt-6.1-sol",
-      model_reasoning_effort: "ultra",
-      service_tier: "ultrafast",
-    } as EditableCodexConfig,
-  };
-  const update = mock(async (input: unknown) => {
-    const patch = input as { values: Partial<EditableCodexConfig> };
-    state.values = { ...state.values, ...patch.values };
-  });
-  const afterWrite = mock(async () => {});
-  const config = withWirebotSettings(
-    {
-      read: async () => ({
-        ...snapshot,
-        values: state.values,
-        capabilities: { ...snapshot.capabilities, models: modelCatalog },
-      }),
-      update,
-    },
+  const service = new AgentConfigService(
     settings,
-    afterWrite,
+    async () => models,
+    "bypassPermissions",
+    () => ({
+      kind: "apiKey",
+      description: "a Claude Console API key",
+      subscription: false,
+    }),
   );
+  const update = mock(async (input: unknown) => await service.update(input));
+  const config = { read: async () => await service.read(), update };
   const messages: SlackPostOptions[] = [];
   const api = {
     postMessage: async (message: SlackPostOptions) => {
@@ -232,70 +239,48 @@ async function fixture() {
   } as unknown as SlackMessagingApi;
   const ui = new SlackConfigUi(api, config, logger);
   const latest = () => messages.at(-1)?.blocks;
-  return { settings, config, ui, update, afterWrite, latest };
+  return { settings, config, ui, update, latest };
 }
 
 test("Slack Auto buttons persist the shared setting and refresh the menu in place", async () => {
   const f = await fixture();
   await f.ui.open("D_ADMIN");
   expect(buttons(f.latest()).map((button) => button.value)).toContain("pick:auto_mode");
-  expect(text(f.latest())).toContain("*Auto effort & speed*: On");
-  expect(text(f.latest())).toContain("*Reasoning effort*: Auto");
+  expect(text(f.latest())).toContain("*Auto effort*: On");
+  expect(text(f.latest())).toContain("*Effort*: Auto");
   await f.ui.handleAction("pick:auto_mode", "D_ADMIN", "1.000");
   expect(buttons(f.latest()).map((button) => button.text.text)).toEqual(["✓ On", "Off", "← Back"]);
-  expect(text(f.latest())).toContain("Ultra at Standard speed");
   await f.ui.handleAction("set:auto_mode:false", "D_ADMIN", "1.000");
   expect(f.settings.read().autoMode).toBe(false);
-  expect(text(f.latest())).toContain("*Speed*: Ultrafast");
+  expect(text(f.latest())).toContain("*Effort*: default");
   await f.ui.handleAction("set:auto_mode:true", "D_ADMIN", "1.000");
   expect(f.settings.read().autoMode).toBe(true);
-  expect(text(f.latest())).toContain("*Speed*: Auto");
-  expect(f.update).not.toHaveBeenCalled();
-  expect(f.afterWrite).not.toHaveBeenCalled();
   for (const block of f.latest() ?? [])
     if (block.type === "actions") expect(block.elements.length).toBeLessThanOrEqual(5);
 });
 
-test("Slack model and speed buttons use capabilities and refresh the runtime after saves", async () => {
+test("Slack model and effort buttons follow the model catalog", async () => {
   const f = await fixture();
-  await f.ui.handleAction("pick:service_tier", "D_ADMIN", "1.000");
-  expect(buttons(f.latest()).map((button) => button.text.text)).toEqual([
-    "Fast",
-    "Ultrafast",
-    "standard (default)",
-    "← Back",
-  ]);
-  await f.ui.handleAction("set:service_tier:ultrafast", "D_ADMIN", "1.000");
-  expect(f.settings.read().autoMode).toBe(false);
-  expect(f.update).toHaveBeenLastCalledWith({
-    expectedVersion: "test-version",
-    values: { service_tier: "ultrafast" },
-  });
-  expect(f.afterWrite).toHaveBeenCalledTimes(1);
-  expect(text(f.latest())).toContain("Auto mode disabled");
-  await f.ui.handleAction("pick:model", "D_ADMIN", "1.000");
-  expect(buttons(f.latest()).map((button) => button.value)).toContain("set:model:gpt-6.1-sol");
-  await f.ui.handleAction("set:model:gpt-6-luna", "D_ADMIN", "1.000");
-  expect(f.update).toHaveBeenLastCalledWith({
-    expectedVersion: "test-version",
-    values: { model: "gpt-6-luna", model_reasoning_effort: null, service_tier: null },
-  });
-  expect(f.afterWrite).toHaveBeenCalledTimes(2);
-  await f.ui.handleAction("pick:service_tier", "D_ADMIN", "1.000");
-  expect(buttons(f.latest()).map((button) => button.value)).not.toContain(
-    "set:service_tier:ultrafast",
-  );
+  await f.ui.handleAction("set:model:opus", "D_ADMIN", "1.000");
+  await f.ui.handleAction("pick:effort", "D_ADMIN", "1.000");
+  expect(buttons(f.latest()).map((button) => button.text.text)).toContain("max");
+  await f.ui.handleAction("set:effort:max", "D_ADMIN", "1.000");
+  expect(f.settings.read()).toMatchObject({ autoMode: false, effort: "max", model: "opus" });
+  expect(text(f.latest())).toContain("Auto effort disabled");
+  await f.ui.handleAction("set:model:haiku", "D_ADMIN", "1.000");
+  expect(f.settings.read()).toMatchObject({ model: "haiku", effort: null });
+  await f.ui.handleAction("pick:effort", "D_ADMIN", "1.000");
+  expect(buttons(f.latest()).map((button) => button.value)).not.toContain("set:effort:max");
 });
 
-test("rejected Slack config writes leave Auto enabled and do not refresh the runtime", async () => {
+test("rejected Slack config writes leave Auto enabled", async () => {
   const f = await fixture();
   f.update.mockImplementation(async () => {
-    throw new Error("Codex rejected this setting");
+    throw new Error("The setting was rejected");
   });
-  await f.ui.handleAction("set:model_reasoning_effort:low", "D_ADMIN", "1.000");
+  await f.ui.handleAction("set:effort:low", "D_ADMIN", "1.000");
   expect(f.settings.read().autoMode).toBe(true);
-  expect(f.afterWrite).not.toHaveBeenCalled();
-  expect(text(f.latest())).toContain("Codex rejected this setting");
+  expect(text(f.latest())).toContain("The setting was rejected");
 });
 
 test("Slack config commands open native buttons while web commands remain available and admin-only", async () => {

@@ -1,36 +1,32 @@
 {
-  "name": "wirebot",
-  "version": "0.4.1",
+  "name": "wirebot-agent",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",
-  "description": "Wirebot — a Telegram, Slack, and Discord bridge for the OpenAI Codex app-server.",
+  "description": "Wirebot on the Claude Agent SDK — a Telegram, Slack, and Discord bridge to a Claude agent.",
   "license": "MIT",
-  "homepage": "https://github.com/sadfun/wirebot#readme",
+  "homepage": "https://github.com/nocell/wirebot-agent#readme",
   "bugs": {
-    "url": "https://github.com/sadfun/wirebot/issues"
+    "url": "https://github.com/nocell/wirebot-agent/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sadfun/wirebot.git"
+    "url": "git+https://github.com/nocell/wirebot-agent.git"
   },
   "engines": {
     "bun": ">=1.4.0"
   },
   "scripts": {
     "build": "bun scripts/build-assets.ts && tailwindcss -i ./src/miniapp/styles.css -o ./dist/miniapp/public/app.css --minify",
-    "compile": "bun run build && bun build --compile --minify --bytecode --sourcemap --define WIREBOT_COMPILED=true src/cli/main.ts --outfile dist/wirebot",
     "check": "tsc -p tsconfig.json && biome check .",
     "dev": "bun run build && bun --watch src/cli/main.ts start",
-    "start": "bun src/cli/main.ts start",
-    "protocol:generate-bindings": "bun src/cli/main.ts codex check --apply --version $(cat codex.version)",
-    "codex:check": "bun src/cli/main.ts codex check",
-    "codex:update": "bun src/cli/main.ts codex check --apply"
+    "start": "bun src/cli/main.ts start"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.312",
     "@emoji-mart/data": "^1.2.1",
     "@grammyjs/runner": "^2.0.3",
-    "@modelcontextprotocol/server": "^2.0.0",
     "@radix-ui/react-switch": "^1.2.6",
     "@slack/socket-mode": "^3.0.0",
     "@slack/web-api": "^8.0.0",
@@ -44,7 +40,7 @@
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.3.0",
     "undici-real": "npm:undici@^7.29.0",
-    "zod": "^4.1.12"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.4",
